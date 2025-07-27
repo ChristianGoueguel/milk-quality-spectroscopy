@@ -5,14 +5,15 @@
     -   [Important limitations](#important-limitations)
     -   [Data evolution](#data-evolution)
     -   [Data processing](#data-processing)
-    -   [Time Series Visualization](#time-series-visualization)
-    -   [Saturated spectra](#saturated-spectra)
-        -   [Detect and flag saturated
-            spectra](#detect-and-flag-saturated-spectra)
-        -   [Visualize saturation
-            patterns](#visualize-saturation-patterns)
-        -   [Interpolation method](#interpolation-method)
-        -   [Removal and Capping methods](#removal-and-capping-methods)
+        -   [Time Series Visualization](#time-series-visualization)
+        -   [Saturated spectra](#saturated-spectra)
+            -   [Detect and flag saturated
+                spectra](#detect-and-flag-saturated-spectra)
+            -   [Visualize saturation
+                patterns](#visualize-saturation-patterns)
+            -   [Interpolation method](#interpolation-method)
+            -   [Removal and Capping
+                methods](#removal-and-capping-methods)
 
 <!-- README.md is generated from README.Rmd. Please edit that file -->
 
@@ -271,7 +272,7 @@ nir_data$sensor_data
 #> #   wavelengths_nm <chr>, sensor <chr>
 ```
 
-## Time Series Visualization
+### Time Series Visualization
 
 ``` r
 visualize_all_sensors_temporal_summary <- function(nir_data) {
@@ -456,7 +457,7 @@ visualize_nirs_time_series(nir_data, "sensor_1", min_measurements = 2)
 
 <img src="man/figures/README-unnamed-chunk-16-1.png" width="100%" style="display: block; margin: auto;" />
 
-## Saturated spectra
+### Saturated spectra
 
 ``` r
 detect_and_handle_saturation <- function(nir_data,
@@ -724,7 +725,7 @@ compare_saturation_handling <- function(nir_data,
 }
 ```
 
-### Detect and flag saturated spectra
+#### Detect and flag saturated spectra
 
 ``` r
 saturation_results <- detect_and_handle_saturation(
@@ -757,7 +758,7 @@ saturation_results <- detect_and_handle_saturation(
 #> Flagging saturated spectra (no removal/modification)
 ```
 
-### Visualize saturation patterns
+#### Visualize saturation patterns
 
 ``` r
 cat("\nCreating saturation visualization plots...\n")
@@ -768,13 +769,13 @@ saturation_plots <- visualize_saturation_patterns(saturation_results, "sensor_1"
 
 <img src="man/figures/README-unnamed-chunk-22-1.png" width="100%" style="display: block; margin: auto;" /><img src="man/figures/README-unnamed-chunk-22-2.png" width="100%" style="display: block; margin: auto;" /><img src="man/figures/README-unnamed-chunk-22-3.png" width="100%" style="display: block; margin: auto;" />
 
-### Interpolation method
+#### Interpolation method
 
 ``` r
 #interpolated_results <- compare_saturation_handling(nir_data, method = "interpolate")
 ```
 
-### Removal and Capping methods
+#### Removal and Capping methods
 
 ``` r
 removal_results <- compare_saturation_handling(nir_data, method = "remove")

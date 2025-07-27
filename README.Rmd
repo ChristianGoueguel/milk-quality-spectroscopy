@@ -2,7 +2,7 @@
 output: 
   github_document:
     toc: true
-    toc_depth: 3
+    toc_depth: 4
     fig_width: 8
     fig_height: 6
 ---
@@ -220,7 +220,7 @@ nir_data$lab_results
 nir_data$sensor_data
 ```
 
-## Time Series Visualization
+### Time Series Visualization
 
 ```{r}
 visualize_all_sensors_temporal_summary <- function(nir_data) {
@@ -380,7 +380,7 @@ visualize_nirs_time_series <- function(
 visualize_nirs_time_series(nir_data, "sensor_1", min_measurements = 2)
 ```
 
-## Saturated spectra
+### Saturated spectra
 
 ```{r}
 detect_and_handle_saturation <- function(nir_data,
@@ -648,7 +648,7 @@ compare_saturation_handling <- function(nir_data,
 }
 ```
 
-### Detect and flag saturated spectra
+#### Detect and flag saturated spectra
 
 ```{r}
 saturation_results <- detect_and_handle_saturation(
@@ -659,20 +659,20 @@ saturation_results <- detect_and_handle_saturation(
   )
 ```
 
-### Visualize saturation patterns
+#### Visualize saturation patterns
 
 ```{r}
 cat("\nCreating saturation visualization plots...\n")
 saturation_plots <- visualize_saturation_patterns(saturation_results, "sensor_1", threshold = 60000)
 ```
 
-### Interpolation method
+#### Interpolation method
 
 ```{r}
 #interpolated_results <- compare_saturation_handling(nir_data, method = "interpolate")
 ```
 
-### Removal and Capping methods
+#### Removal and Capping methods
 
 ```{r}
 removal_results <- compare_saturation_handling(nir_data, method = "remove")
