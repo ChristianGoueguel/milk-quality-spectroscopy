@@ -1,33 +1,65 @@
 
+-   [Milk Quality Spectroscopy](#milk-quality-spectroscopy)
+-   [Dataset](#dataset)
+    -   [Key data components](#key-data-components)
+    -   [Important limitations](#important-limitations)
+    -   [Data evolution](#data-evolution)
+
 <!-- README.md is generated from README.Rmd. Please edit that file -->
 
-# milk-quality-spectroscopy
+# Milk Quality Spectroscopy
 
 <!-- badges: start -->
 <!-- badges: end -->
 
-The goal of milk-quality-spectroscopy is to …
-
-What is special about using `README.Rmd` instead of just `README.md`?
-You can include R chunks like so:
-
 ``` r
-summary(cars)
-#>      speed           dist       
-#>  Min.   : 4.0   Min.   :  2.00  
-#>  1st Qu.:12.0   1st Qu.: 26.00  
-#>  Median :15.0   Median : 36.00  
-#>  Mean   :15.4   Mean   : 42.98  
-#>  3rd Qu.:19.0   3rd Qu.: 56.00  
-#>  Max.   :25.0   Max.   :120.00
+if (requireNamespace("ggplot2", quietly = TRUE)) {
+  ggplot2::theme_set(ggplot2::theme_minimal(base_size = 12))
+}
 ```
 
-You’ll still need to render `README.Rmd` regularly, to keep `README.md`
-up-to-date.
+``` r
+set.seed(123)
+```
 
-You can also embed plots, for example:
+``` r
+suppressPackageStartupMessages({
+  library(tidyverse)
+})
+```
 
-![](README_files/figure-gfm/pressure-1.png)<!-- -->
+# Dataset
 
-In that case, don’t forget to commit and push the resulting figure
-files, so they display on GitHub.
+The data is structured by sensor/stall with each sensor directory
+containing:
+
+-   **Lab results** (CSV format with tube_no as primary key)
+-   **Sensor configuration** (wavelengths, calibration coefficients)
+-   **Spectral measurements** (Parquet files, one per milk sample)
+-   **Dark spectra** (reference measurements)
+
+## Key data components
+
+**Lab Results**: Milk analysis including fat percentage, protein,
+somatic cell count and, lactose linked to specific cows and milking
+sessions.
+
+**Spectral Data**: Raw 16-bit spectral arrays captured during milking,
+with metadata like temperature, LED current, and integration time. Each
+spectrum is classified as “dark,” “sample,” or “empty.”
+
+**Sensor Info**: Each sensor has unique wavelength calibrations and
+measurement parameters that aren’t standardized across sensors.
+
+## Important limitations
+
+-   Temperature and LED measurements are raw ADC values, not
+    standardized between sensors
+-   Each sensor measures different wavelengths
+-   Some timing discrepancies remain due to clock source differences
+
+## Data evolution
+
+The dataset has evolved from initial CSV format to Parquet compression,
+with spectral data consolidated into array columns rather than
+individual wavelength columns for more efficient storage and processing.

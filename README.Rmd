@@ -1,5 +1,10 @@
 ---
-output: github_document
+output: 
+  github_document:
+    toc: true
+    toc_depth: 3
+    fig_width: 8
+    fig_height: 6
 ---
 
 <!-- README.md is generated from README.Rmd. Please edit that file -->
@@ -7,29 +12,74 @@ output: github_document
 ```{r, include = FALSE}
 knitr::opts_chunk$set(
   collapse = TRUE,
-  comment = "#>"
+  comment = "#>",
+  fig.path = "man/figures/README-",
+  out.width = "100%",
+  fig.retina = 2,
+  fig.align = "center",
+  dpi = 300,
+  warning = FALSE,
+  message = FALSE,
+  echo = TRUE,
+  cache = FALSE,
+  dev = "png"
 )
 ```
 
-# milk-quality-spectroscopy
+# Milk Quality Spectroscopy {-}
 
 <!-- badges: start -->
 <!-- badges: end -->
 
-The goal of milk-quality-spectroscopy is to ...
-
-What is special about using `README.Rmd` instead of just `README.md`? You can include R chunks like so:
-
-```{r cars}
-summary(cars)
+```{r}
+if (requireNamespace("ggplot2", quietly = TRUE)) {
+  ggplot2::theme_set(ggplot2::theme_minimal(base_size = 12))
+}
 ```
 
-You'll still need to render `README.Rmd` regularly, to keep `README.md` up-to-date.
-
-You can also embed plots, for example:
-
-```{r pressure, echo = FALSE}
-plot(pressure)
+```{r}
+set.seed(123)
 ```
 
-In that case, don't forget to commit and push the resulting figure files, so they display on GitHub.
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+})
+```
+
+# Dataset
+The data is structured by sensor/stall with each sensor directory containing:
+
+  - **Lab results** (CSV format with tube_no as primary key)
+  - **Sensor configuration** (wavelengths, calibration coefficients)
+  - **Spectral measurements** (Parquet files, one per milk sample)
+  - **Dark spectra** (reference measurements)
+
+## Key data components
+
+**Lab Results**: Milk analysis including fat percentage, protein, somatic cell count and, lactose linked to specific cows and milking sessions.
+
+**Spectral Data**: Raw 16-bit spectral arrays captured during milking, with metadata like temperature, LED current, and integration time. Each spectrum is classified as "dark," "sample," or "empty."
+
+**Sensor Info**: Each sensor has unique wavelength calibrations and measurement parameters that aren't standardized across sensors.
+
+## Important limitations
+
+  - Temperature and LED measurements are raw ADC values, not standardized between sensors
+  - Each sensor measures different wavelengths
+  - Some timing discrepancies remain due to clock source differences
+
+## Data evolution
+The dataset has evolved from initial CSV format to Parquet compression, with spectral data consolidated into array columns rather than individual wavelength columns for more efficient storage and processing.
+
+
+
+
+
+
+
+
+
+
+
+
