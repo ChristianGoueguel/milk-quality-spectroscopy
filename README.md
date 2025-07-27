@@ -5,6 +5,14 @@
     -   [Important limitations](#important-limitations)
     -   [Data evolution](#data-evolution)
     -   [Data processing](#data-processing)
+    -   [Time Series Visualization](#time-series-visualization)
+    -   [Saturated spectra](#saturated-spectra)
+        -   [Detect and flag saturated
+            spectra](#detect-and-flag-saturated-spectra)
+        -   [Visualize saturation
+            patterns](#visualize-saturation-patterns)
+        -   [Interpolation method](#interpolation-method)
+        -   [Removal and Capping methods](#removal-and-capping-methods)
 
 <!-- README.md is generated from README.Rmd. Please edit that file -->
 
@@ -77,7 +85,6 @@ read_sensor_csvs <- function(sensor_folder) {
   lab_results$sensor <- sensor_folder
   sensor_data <- read_csv(file.path(sensor_path, "sensor.csv"), show_col_types = FALSE)
   sensor_data$sensor <- sensor_folder
-  
   return(list(lab_results = lab_results, sensor_data = sensor_data))
 }
 ```
@@ -135,7 +142,6 @@ subtract_dark_spectrum <- function(tube_spectrum, dark_spectrum, verbose = FALSE
       }
     }
   }
-  
   return(corrected_spectrum)
 }
 ```
@@ -264,6 +270,8 @@ nir_data$sensor_data
 #> # ℹ 4 more variables: imager_sn <dbl>, sensor_wavelength_coefficients <chr>,
 #> #   wavelengths_nm <chr>, sensor <chr>
 ```
+
+## Time Series Visualization
 
 ``` r
 visualize_all_sensors_temporal_summary <- function(nir_data) {
@@ -430,8 +438,9 @@ visualize_nirs_time_series <- function(
       caption = "Colors represent measurement time (darker = earlier, lighter = later)"
     ) +
     theme_minimal() +
-    theme(strip.text = element_text(size = 10, face = "bold"),
-          legend.position = "bottom")
+    theme(
+      strip.text = element_text(size = 10, face = "bold"),
+      legend.position = "bottom")
   print(p2)
 }
 ```
@@ -446,3 +455,380 @@ visualize_nirs_time_series(nir_data, "sensor_1", min_measurements = 2)
 ```
 
 <img src="man/figures/README-unnamed-chunk-16-1.png" width="100%" style="display: block; margin: auto;" />
+
+## Saturated spectra
+
+``` r
+detect_and_handle_saturation <- function(nir_data,
+                                         saturation_threshold = 60000,
+                                         saturation_percentage = 0.05,
+                                         method = "flag") {
+  cat("=== Saturation Detection and Handling ===\n")
+  is_saturated <- function(spec_array,
+                           threshold = saturation_threshold,
+                           percentage = saturation_percentage) {
+    if (is.null(spec_array) || length(spec_array) == 0)
+      return(FALSE)
+    n_saturated <- sum(spec_array >= threshold, na.rm = TRUE)
+    saturation_ratio <- n_saturated / length(spec_array)
+    return(saturation_ratio >= percentage)
+  }
+  
+  corrected_data <- nir_data$corrected_spectra %>%
+    rowwise() %>%
+    mutate(
+      max_intensity = max(spec_array, na.rm = TRUE),
+      mean_intensity = mean(spec_array, na.rm = TRUE),
+      is_saturated = is_saturated(spec_array, saturation_threshold, saturation_percentage),
+      n_saturated_points = sum(spec_array >= saturation_threshold, na.rm = TRUE),
+      saturation_percentage = n_saturated_points / length(spec_array) * 100
+    ) %>%
+    ungroup()
+  
+  saturation_summary <- corrected_data %>%
+    group_by(sensor) %>%
+    summarise(
+      total_spectra = n(),
+      saturated_spectra = sum(is_saturated),
+      saturation_rate = round(saturated_spectra / total_spectra * 100, 2),
+      max_intensity_overall = max(max_intensity, na.rm = TRUE),
+      mean_max_intensity = round(mean(max_intensity, na.rm = TRUE), 0),
+      .groups = "drop"
+    )
+  
+  cat("Saturation Summary by Sensor:\n")
+  print(saturation_summary)
+  total_saturated <- sum(corrected_data$is_saturated)
+  total_spectra <- nrow(corrected_data)
+  overall_rate <- round(total_saturated / total_spectra * 100, 2)
+  
+  cat(
+    sprintf(
+      "\nOverall: %d/%d spectra saturated (%.2f%%)\n",
+      total_saturated,
+      total_spectra,
+      overall_rate
+    )
+  )
+  
+  if (method == "remove") {
+    cat("\nRemoving saturated spectra...\n")
+    clean_data <- corrected_data %>% filter(!is_saturated)
+    cat(
+      sprintf(
+        "Removed %d saturated spectra. %d spectra remaining.\n",
+        total_saturated,
+        nrow(clean_data)
+      )
+    )
+    
+  } else if (method == "cap") {
+    cat(sprintf(
+      "\nCapping intensities at threshold: %d\n",
+      saturation_threshold
+    ))
+    clean_data <- corrected_data %>%
+      rowwise() %>%
+      mutate(spec_array = list(pmin(spec_array, saturation_threshold))) %>%
+      ungroup()
+    
+  } else if (method == "interpolate") {
+    cat("\nInterpolating saturated regions...\n")
+    clean_data <- corrected_data %>%
+      rowwise() %>%
+      mutate(spec_array = list(
+        interpolate_saturated_points(spec_array, saturation_threshold)
+      )) %>%
+      ungroup()
+    
+  } else {
+    cat("\nFlagging saturated spectra (no removal/modification)\n")
+    clean_data <- corrected_data
+  }
+  
+  return(
+    list(
+      data = clean_data,
+      saturation_summary = saturation_summary,
+      total_saturated = total_saturated,
+      saturation_rate = overall_rate
+    )
+  )
+}
+```
+
+``` r
+interpolate_saturated_points <- function(spec_array, threshold) {
+  if (is.null(spec_array) ||
+      length(spec_array) == 0)
+    return(spec_array)
+  
+  saturated_idx <- which(spec_array >= threshold)
+  if (length(saturated_idx) == 0)
+    return(spec_array)
+  spec_interpolated <- spec_array
+  saturated_groups <- split(saturated_idx, cumsum(c(1, diff(saturated_idx) != 1)))
+  
+  for (group in saturated_groups) {
+    start_idx <- max(1, min(group) - 1)
+    end_idx <- min(length(spec_array), max(group) + 1)
+    
+    if (start_idx < min(group) && end_idx > max(group)) {
+      x_vals <- c(start_idx, end_idx)
+      y_vals <- c(spec_array[start_idx], spec_array[end_idx])
+      for (idx in group) {
+        spec_interpolated[idx] <- approx(x_vals, y_vals, idx)$y
+      }
+    }
+  }
+  return(spec_interpolated)
+}
+```
+
+``` r
+visualize_saturation_patterns <- function(saturation_results,
+                                          sensor_focus = "sensor_1",
+                                          threshold = 60000) {
+  p1 <- saturation_results$saturation_summary %>%
+    ggplot(aes(x = sensor, y = saturation_rate, fill = saturation_rate)) +
+    geom_col() +
+    scale_fill_viridis_c(name = "Saturation\nRate (%)") +
+    labs(
+      title = "Saturation Rate by Sensor",
+      x = "Sensor",
+      y = "Saturation Rate (%)",
+      caption = paste("Threshold:", threshold, "counts")
+    ) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  print(p1)
+  
+  p2 <- saturation_results$data %>%
+    ggplot(aes(x = max_intensity, fill = is_saturated)) +
+    geom_histogram(bins = 50, alpha = 0.7) +
+    geom_vline(
+      xintercept = threshold,
+      color = "red",
+      linetype = "dashed",
+      size = 1
+    ) +
+    scale_fill_manual(values = c("FALSE" = "steelblue", "TRUE" = "red"),
+                      name = "Saturated") +
+    labs(
+      title = "Distribution of Maximum Intensities",
+      x = "Maximum Intensity",
+      y = "Count",
+      caption = "Red line shows saturation threshold"
+    ) +
+    theme_minimal()
+  
+  print(p2)
+  
+  sensor_data <- saturation_results$data %>%
+    filter(sensor == sensor_focus) %>%
+    mutate(datetime = as.POSIXct(datetime))
+  
+  if (nrow(sensor_data) > 0) {
+    p3 <- sensor_data %>%
+      ggplot(aes(x = datetime, y = max_intensity, color = is_saturated)) +
+      geom_point(alpha = 0.7) +
+      geom_hline(yintercept = threshold,
+                 color = "red",
+                 linetype = "dashed") +
+      scale_color_manual(values = c("FALSE" = "steelblue", "TRUE" = "red"),
+                         name = "Saturated") +
+      labs(
+        title = paste("Saturation Over Time -", sensor_focus),
+        x = "Date/Time",
+        y = "Maximum Intensity",
+        caption = "Red line shows saturation threshold"
+      ) +
+      theme_minimal()
+    
+    print(p3)
+  }
+  
+  return(
+    list(
+      saturation_by_sensor = p1,
+      intensity_distribution = p2,
+      time_series = if (exists("p3"))
+        p3
+      else
+        NULL
+    )
+  )
+}
+```
+
+``` r
+compare_saturation_handling <- function(nir_data,
+                                        method = "interpolate",
+                                        saturation_threshold = 60000,
+                                        tube_example = NULL,
+                                        sensor_example = "sensor_1") {
+  results <- detect_and_handle_saturation(nir_data, saturation_threshold, method = method)
+  if (is.null(tube_example)) {
+    saturated_tubes <- results$data %>%
+      filter(sensor == sensor_example, is_saturated == TRUE) %>%
+      slice_head(n = 1)
+    
+    if (nrow(saturated_tubes) > 0) {
+      tube_example <- saturated_tubes$tube_number[1]
+    } else {
+      tube_example <- results$data %>%
+        filter(sensor == sensor_example) %>%
+        slice_head(n = 1) %>%
+        pull(tube_number)
+    }
+  }
+  original_tube <- nir_data$corrected_spectra %>%
+    filter(sensor == sensor_example, tube_number == tube_example) %>%
+    slice_head(n = 1)
+  
+  processed_tube <- results$data %>%
+    filter(sensor == sensor_example, tube_number == tube_example) %>%
+    slice_head(n = 1)
+  
+  if (nrow(original_tube) > 0 && nrow(processed_tube) > 0) {
+    comparison_data <- data.frame(
+      wavelength_index = rep(1:length(original_tube$spec_array[[1]]), 2),
+      intensity = c(original_tube$spec_array[[1]], processed_tube$spec_array[[1]]),
+      type = rep(c("Original", paste("After", method)), each = length(original_tube$spec_array[[1]]))
+    )
+    
+    p_compare <- comparison_data %>%
+      ggplot(aes(x = wavelength_index, y = intensity, color = type)) +
+      geom_line(size = 0.8) +
+      geom_hline(
+        yintercept = saturation_threshold,
+        linetype = "dashed",
+        color = "red",
+        alpha = 0.7
+      ) +
+      scale_color_manual(values = c("Original" = "red", paste("After", method), "blue")) +
+      labs(
+        title = paste("Saturation Handling Comparison -", method),
+        subtitle = paste("Tube", tube_example, "from", sensor_example),
+        x = "Wavelength Index",
+        y = "Corrected Intensity",
+        color = "Processing",
+        caption = "Red dashed line shows saturation threshold"
+      ) +
+      theme_minimal()
+    
+    print(p_compare)
+  }
+  return(results)
+}
+```
+
+### Detect and flag saturated spectra
+
+``` r
+saturation_results <- detect_and_handle_saturation(
+  nir_data, 
+  saturation_threshold = 60000, 
+  saturation_percentage = 0.05, 
+  method = "flag"
+  )
+#> === Saturation Detection and Handling ===
+#> Saturation Summary by Sensor:
+#> # A tibble: 12 × 6
+#>    sensor  total_spectra saturated_spectra saturation_rate max_intensity_overall
+#>    <chr>           <int>             <int>           <dbl>                 <int>
+#>  1 sensor…         25124             18364            73.1                 65535
+#>  2 sensor…         26353             20463            77.6                 65535
+#>  3 sensor…         26306             22459            85.4                 65535
+#>  4 sensor…         26820             19720            73.5                 65535
+#>  5 sensor…         23778             18134            76.3                 65535
+#>  6 sensor…         25791             22510            87.3                 65535
+#>  7 sensor…         25719             11476            44.6                 65535
+#>  8 sensor…         26679             23046            86.4                 65535
+#>  9 sensor…         26038             21541            82.7                 65535
+#> 10 sensor…         25764             19896            77.2                 65535
+#> 11 sensor…         25651             20846            81.3                 65535
+#> 12 sensor…         25119             17544            69.8                 65535
+#> # ℹ 1 more variable: mean_max_intensity <dbl>
+#> 
+#> Overall: 235999/309142 spectra saturated (76.34%)
+#> 
+#> Flagging saturated spectra (no removal/modification)
+```
+
+### Visualize saturation patterns
+
+``` r
+cat("\nCreating saturation visualization plots...\n")
+#> 
+#> Creating saturation visualization plots...
+saturation_plots <- visualize_saturation_patterns(saturation_results, "sensor_1", threshold = 60000)
+```
+
+<img src="man/figures/README-unnamed-chunk-22-1.png" width="100%" style="display: block; margin: auto;" /><img src="man/figures/README-unnamed-chunk-22-2.png" width="100%" style="display: block; margin: auto;" /><img src="man/figures/README-unnamed-chunk-22-3.png" width="100%" style="display: block; margin: auto;" />
+
+### Interpolation method
+
+``` r
+#interpolated_results <- compare_saturation_handling(nir_data, method = "interpolate")
+```
+
+### Removal and Capping methods
+
+``` r
+removal_results <- compare_saturation_handling(nir_data, method = "remove")
+#> === Saturation Detection and Handling ===
+#> Saturation Summary by Sensor:
+#> # A tibble: 12 × 6
+#>    sensor  total_spectra saturated_spectra saturation_rate max_intensity_overall
+#>    <chr>           <int>             <int>           <dbl>                 <int>
+#>  1 sensor…         25124             18364            73.1                 65535
+#>  2 sensor…         26353             20463            77.6                 65535
+#>  3 sensor…         26306             22459            85.4                 65535
+#>  4 sensor…         26820             19720            73.5                 65535
+#>  5 sensor…         23778             18134            76.3                 65535
+#>  6 sensor…         25791             22510            87.3                 65535
+#>  7 sensor…         25719             11476            44.6                 65535
+#>  8 sensor…         26679             23046            86.4                 65535
+#>  9 sensor…         26038             21541            82.7                 65535
+#> 10 sensor…         25764             19896            77.2                 65535
+#> 11 sensor…         25651             20846            81.3                 65535
+#> 12 sensor…         25119             17544            69.8                 65535
+#> # ℹ 1 more variable: mean_max_intensity <dbl>
+#> 
+#> Overall: 235999/309142 spectra saturated (76.34%)
+#> 
+#> Removing saturated spectra...
+#> Removed 235999 saturated spectra. 73143 spectra remaining.
+```
+
+<img src="man/figures/README-unnamed-chunk-24-1.png" width="100%" style="display: block; margin: auto;" />
+
+``` r
+capped_results <- compare_saturation_handling(nir_data, method = "cap")
+#> === Saturation Detection and Handling ===
+#> Saturation Summary by Sensor:
+#> # A tibble: 12 × 6
+#>    sensor  total_spectra saturated_spectra saturation_rate max_intensity_overall
+#>    <chr>           <int>             <int>           <dbl>                 <int>
+#>  1 sensor…         25124             18364            73.1                 65535
+#>  2 sensor…         26353             20463            77.6                 65535
+#>  3 sensor…         26306             22459            85.4                 65535
+#>  4 sensor…         26820             19720            73.5                 65535
+#>  5 sensor…         23778             18134            76.3                 65535
+#>  6 sensor…         25791             22510            87.3                 65535
+#>  7 sensor…         25719             11476            44.6                 65535
+#>  8 sensor…         26679             23046            86.4                 65535
+#>  9 sensor…         26038             21541            82.7                 65535
+#> 10 sensor…         25764             19896            77.2                 65535
+#> 11 sensor…         25651             20846            81.3                 65535
+#> 12 sensor…         25119             17544            69.8                 65535
+#> # ℹ 1 more variable: mean_max_intensity <dbl>
+#> 
+#> Overall: 235999/309142 spectra saturated (76.34%)
+#> 
+#> Capping intensities at threshold: 60000
+```
+
+<img src="man/figures/README-unnamed-chunk-25-1.png" width="100%" style="display: block; margin: auto;" />
