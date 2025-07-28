@@ -14,6 +14,16 @@
             -   [Interpolation method](#interpolation-method)
             -   [Removal and Capping
                 methods](#removal-and-capping-methods)
+    -   [Modeling](#modeling)
+        -   [Data preparation](#data-preparation)
+        -   [Data splits and
+            preprocessing](#data-splits-and-preprocessing)
+        -   [Models tuning and
+            evaluation](#models-tuning-and-evaluation)
+        -   [Model performance
+            comparison](#model-performance-comparison)
+        -   [Prediction plots](#prediction-plots)
+        -   [Feature Importance](#feature-importance)
 
 <!-- README.md is generated from README.Rmd. Please edit that file -->
 
@@ -36,7 +46,12 @@ set.seed(123)
 suppressPackageStartupMessages({
   library(tidyverse)
   library(viridis)
-  library(arrow) 
+  library(arrow)
+  library(tidymodels)
+  library(corrplot)
+  library(vip)
+  library(patchwork)
+  library(yardstick)
 })
 ```
 
@@ -772,7 +787,7 @@ saturation_plots <- visualize_saturation_patterns(saturation_results, "sensor_1"
 #### Interpolation method
 
 ``` r
-#interpolated_results <- compare_saturation_handling(nir_data, method = "interpolate")
+# interpolated_results <- compare_saturation_handling(nir_data, method = "interpolate")
 ```
 
 #### Removal and Capping methods
@@ -833,3 +848,303 @@ capped_results <- compare_saturation_handling(nir_data, method = "cap")
 ```
 
 <img src="man/figures/README-unnamed-chunk-25-1.png" width="100%" style="display: block; margin: auto;" />
+
+## Modeling
+
+### Data preparation
+
+``` r
+prepare_modeling_data <- function(nir_data, use_interpolated = FALSE) {
+  cat("Preparing data for modeling...\n")
+  if (use_interpolated && exists("interpolated_data")) {
+    spectral_data <- interpolated_data$data
+    cat("Using interpolated spectral data\n")
+  } else {
+    spectral_data <- nir_data$corrected_spectra
+    cat("Using original corrected spectral data\n")
+  }
+  
+  spectral_features <- spectral_data %>%
+    select(tube_number, sensor, spec_array) %>%
+    mutate(tube_number = as.character(tube_number)) %>%
+    rowwise() %>%
+    mutate(
+      spec_data = list(setNames(as.numeric(spec_array), paste0("wl_", 1:length(spec_array))))
+    ) %>%
+    ungroup() %>%
+    select(-spec_array) %>%
+    unnest_wider(spec_data)
+  
+  lab_data <- nir_data$lab_results %>%
+    select(
+      tube_number, fat_percent, protein_percent, scc_thous_per_ml, lactose_percent,
+      barnname, lact, grp, dim_days, daily_milking, milk_wt_lbs
+      ) %>%
+    filter(
+      !is.na(fat_percent), 
+      !is.na(protein_percent), 
+      !is.na(scc_thous_per_ml), 
+      !is.na(lactose_percent)
+      )
+  
+  modeling_data <- spectral_features %>%
+    inner_join(lab_data, by = "tube_number") %>%
+    filter(if_all(starts_with("wl_"), ~ !is.na(.x)))
+  
+  cat("Final dataset dimensions:", nrow(modeling_data), "x", ncol(modeling_data), "\n")
+  cat("Number of spectral features:", sum(grepl("^wl_", names(modeling_data))), "\n")
+  
+  return(modeling_data)
+}
+```
+
+### Data splits and preprocessing
+
+``` r
+create_modeling_workflow <- function(modeling_data, target_variable) {
+  cat(sprintf("\n=== Creating workflow for %s ===\n", target_variable))
+  data_split <- initial_split(modeling_data, prop = 0.8, strata = all_of(target_variable))
+  train_data <- training(data_split)
+  test_data <- testing(data_split)
+  cat("Training set:", nrow(train_data), "samples\n")
+  cat("Test set:", nrow(test_data), "samples\n")
+  cv_folds <- vfold_cv(train_data, v = 5, strata = all_of(target_variable))
+  
+  recipe_spec <- recipe(as.formula(paste(target_variable, "~ .")), data = train_data) %>%
+    step_rm(tube_number, sensor) %>%
+    step_dummy(all_nominal_predictors()) %>%
+    step_zv(all_predictors()) %>%
+    step_corr(all_numeric_predictors(), threshold = 0.95) %>%
+    step_normalize(all_numeric_predictors()) %>%
+    step_pca(starts_with("wl_"), threshold = 0.95, prefix = "PC")
+  return(list(
+    split = data_split,
+    train = train_data,
+    test = test_data,
+    cv_folds = cv_folds,
+    recipe = recipe_spec
+  ))
+}
+```
+
+### Models tuning and evaluation
+
+``` r
+define_models <- function() {
+  cat("Defining model specifications...\n")
+  rf_spec <- rand_forest(
+    mtry = tune(),
+    trees = tune(),
+    min_n = tune()
+  ) %>%
+    set_engine("ranger", importance = "impurity") %>%
+    set_mode("regression")
+  
+  elastic_spec <- linear_reg(
+    penalty = tune(),
+    mixture = tune()
+  ) %>%
+    set_engine("glmnet") %>%
+    set_mode("regression")
+  
+  xgb_spec <- boost_tree(
+    trees = tune(),
+    tree_depth = tune(),
+    learn_rate = tune(),
+    min_n = tune()
+  ) %>%
+    set_engine("xgboost") %>%
+    set_mode("regression")
+  
+  svm_spec <- svm_rbf(
+    cost = tune(),
+    rbf_sigma = tune()
+  ) %>%
+    set_engine("kernlab") %>%
+    set_mode("regression")
+  
+  return(list(
+    random_forest = rf_spec,
+    elastic_net = elastic_spec,
+    xgboost = xgb_spec,
+    svm = svm_spec
+  ))
+}
+```
+
+``` r
+tune_and_evaluate_models <- function(workflow_data, models, target_variable) {
+  cat(sprintf("Tuning models for %s...\n", target_variable))
+  results <- list()
+  for (model_name in names(models)) {
+    cat(sprintf("Processing %s...\n", model_name))
+    workflow_spec <- workflow() %>%
+      add_recipe(workflow_data$recipe) %>%
+      add_model(models[[model_name]])
+    
+    if (model_name == "random_forest") {
+      tune_grid <- grid_regular(
+        mtry(range = c(5, 20)),
+        trees(range = c(100, 500)),
+        min_n(range = c(5, 20)),
+        levels = 3
+      )
+    } else if (model_name == "elastic_net") {
+      tune_grid <- grid_regular(
+        penalty(),
+        mixture(),
+        levels = 5
+      )
+    } else if (model_name == "xgboost") {
+      tune_grid <- grid_regular(
+        trees(range = c(100, 500)),
+        tree_depth(range = c(3, 10)),
+        learn_rate(range = c(0.01, 0.3)),
+        min_n(range = c(5, 20)),
+        levels = 3
+      )
+    } else if (model_name == "svm") {
+      tune_grid <- grid_regular(
+        cost(),
+        rbf_sigma(),
+        levels = 4
+      )
+    }
+    
+    tune_results <- workflow_spec %>%
+      tune_grid(
+        resamples = workflow_data$cv_folds,
+        grid = tune_grid,
+        metrics = metric_set(rmse, rsq, mae),
+        control = control_grid(save_pred = TRUE, verbose = FALSE)
+      )
+    
+    best_params <- tune_results %>%
+      select_best(metric = "rmse")
+    
+    final_workflow <- workflow_spec %>%
+      finalize_workflow(best_params)
+    
+    final_fit <- final_workflow %>%
+      fit(workflow_data$train)
+    
+    test_predictions <- final_fit %>%
+      predict(workflow_data$test) %>%
+      bind_cols(workflow_data$test %>% select(all_of(target_variable)))
+    
+    test_metrics <- test_predictions %>%
+      metrics(truth = !!sym(target_variable), estimate = .pred)
+    
+    results[[model_name]] <- list(
+      tune_results = tune_results,
+      best_params = best_params,
+      final_fit = final_fit,
+      test_predictions = test_predictions,
+      test_metrics = test_metrics
+    )
+  }
+  return(results)
+}
+```
+
+### Model performance comparison
+
+``` r
+compare_model_performance <- function(model_results, target_variable) {
+  cat(sprintf("\n=== Model Performance Comparison for %s ===\n", target_variable))
+  performance_summary <- map_dfr(model_results, ~ {
+    .x$test_metrics %>%
+      filter(.metric %in% c("rmse", "rsq", "mae")) %>%
+      select(.metric, .estimate)
+  }, .id = "model")
+
+  performance_table <- performance_summary %>%
+    pivot_wider(names_from = .metric, values_from = .estimate) %>%
+    arrange(rmse)
+  
+  print(performance_table)
+  
+  p1 <- performance_summary %>%
+    filter(.metric == "rmse") %>%
+    ggplot(aes(x = reorder(model, .estimate), y = .estimate, fill = model)) +
+    geom_col() +
+    coord_flip() +
+    labs(
+      title = paste("RMSE Comparison -", target_variable),
+      x = "Model",
+      y = "RMSE",
+      fill = "Model"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "none")
+  
+  p2 <- performance_summary %>%
+    filter(.metric == "rsq") %>%
+    ggplot(aes(x = reorder(model, -.estimate), y = .estimate, fill = model)) +
+    geom_col() +
+    coord_flip() +
+    labs(
+      title = paste("R² Comparison -", target_variable),
+      x = "Model",
+      y = "R²",
+      fill = "Model"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "none")
+  
+  print(p1 / p2)
+  return(performance_table)
+}
+```
+
+### Prediction plots
+
+``` r
+create_prediction_plots <- function(model_results, target_variable) {
+  plots <- map(names(model_results), ~ {
+    predictions <- model_results[[.x]]$test_predictions
+    predictions %>%
+      ggplot(aes(x = !!sym(target_variable), y = .pred)) +
+      geom_point(alpha = 0.6) +
+      geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+      labs(
+        title = paste(.x, "-", target_variable),
+        x = paste("Actual", target_variable),
+        y = paste("Predicted", target_variable)
+      ) +
+      theme_minimal()
+  })
+  names(plots) <- names(model_results)
+  combined_plot <- wrap_plots(plots, ncol = 2)
+  print(combined_plot)
+  return(plots)
+}
+```
+
+### Feature Importance
+
+``` r
+extract_feature_importance <- function(model_results, target_variable, top_n = 15) {
+  cat(sprintf("\nExtracting feature importance for %s...\n", target_variable))
+  importance_plots <- list()
+  for (model_name in names(model_results)) {
+    tryCatch({
+      if (model_name %in% c("random_forest", "xgboost")) {
+        importance_plot <- model_results[[model_name]]$final_fit %>%
+          extract_fit_parsnip() %>%
+          vip(num_features = top_n) +
+          labs(title = paste("Feature Importance -", model_name, "-", target_variable)) +
+          theme_minimal()
+        importance_plots[[model_name]] <- importance_plot
+      }
+    }, error = function(e) {
+      cat(sprintf("Could not extract importance for %s: %s\n", model_name, e$message))
+    })
+  }
+  if (length(importance_plots) > 0) {
+    combined_importance <- wrap_plots(importance_plots, ncol = 2)
+    print(combined_importance)
+  }
+  return(importance_plots)
+}
+```
