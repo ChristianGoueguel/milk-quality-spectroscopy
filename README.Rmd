@@ -51,6 +51,14 @@ suppressPackageStartupMessages({
   library(vip)
   library(patchwork)
   library(yardstick)
+  library(skimr)
+  library(GGally)
+  library(FactoMineR)
+  library(factoextra)
+  library(gridExtra)
+  library(RColorBrewer)
+  library(knitr)
+  library(ggforce)
 })
 ```
 
@@ -225,7 +233,7 @@ nir_data$lab_results
 nir_data$sensor_data
 ```
 
-### Time Series Visualization
+### Time series visualization
 
 ```{r}
 visualize_all_sensors_temporal_summary <- function(nir_data) {
@@ -677,7 +685,7 @@ saturation_plots <- visualize_saturation_patterns(saturation_results, "sensor_1"
 # interpolated_results <- compare_saturation_handling(nir_data, method = "interpolate")
 ```
 
-#### Removal and Capping methods
+#### Removal and capping methods
 
 ```{r}
 removal_results <- compare_saturation_handling(nir_data, method = "remove")
@@ -685,6 +693,688 @@ removal_results <- compare_saturation_handling(nir_data, method = "remove")
 
 ```{r}
 capped_results <- compare_saturation_handling(nir_data, method = "cap")
+```
+
+## Exploratory Data Analysis
+
+### Descriptive statistics for milk quality target variables
+```{r}
+calculate_target_statistics <- function(nir_data) {
+  cat("=== Descriptive Statistics for Milk Quality Targets ===\n\n")
+  targets_data <- nir_data$lab_results %>%
+    select(
+      fat_percent, protein_percent, scc_thous_per_ml, lactose_percent,
+      barnname, lact, grp, dim_days, daily_milking, milk_wt_lbs) %>%
+    filter(
+      !is.na(fat_percent), 
+      !is.na(protein_percent), 
+      !is.na(scc_thous_per_ml),
+      !is.na(lactose_percent)
+      )
+  
+  cat("Total samples with complete target data:", nrow(targets_data), "\n\n")
+  target_vars <- c("fat_percent", "protein_percent", "scc_thous_per_ml", "lactose_percent")
+  
+  summary_stats <- targets_data %>%
+    select(all_of(target_vars)) %>%
+    summarise(
+      across(everything(), list(
+        n = ~ sum(!is.na(.x)),
+        mean = ~ mean(.x, na.rm = TRUE),
+        median = ~ median(.x, na.rm = TRUE),
+        sd = ~ sd(.x, na.rm = TRUE),
+        min = ~ min(.x, na.rm = TRUE),
+        max = ~ max(.x, na.rm = TRUE),
+        q25 = ~ quantile(.x, 0.25, na.rm = TRUE),
+        q75 = ~ quantile(.x, 0.75, na.rm = TRUE),
+        iqr = ~ IQR(.x, na.rm = TRUE),
+        cv = ~ sd(.x, na.rm = TRUE) / mean(.x, na.rm = TRUE) * 100,
+        skewness = ~ moments::skewness(.x, na.rm = TRUE),
+        kurtosis = ~ moments::kurtosis(.x, na.rm = TRUE)
+      ), .names = "{.col}_{.fn}")
+    ) %>%
+    pivot_longer(everything(), names_to = "stat", values_to = "value") %>%
+    separate(stat, into = c("variable", "statistic"), sep = "_(?=[^_]*$)") %>%
+    pivot_wider(names_from = statistic, values_from = value) %>%
+    select(variable, n, mean, median, sd, cv, min, q25, q75, max, iqr, skewness, kurtosis)
+  
+  cat("Summary Statistics Table:\n")
+  print(kable(summary_stats, digits = 3, format = "markdown"))
+  cat("\n")
+  
+  return(list(
+    summary_stats = summary_stats,
+    targets_data = targets_data
+  ))
+}
+```
+
+```{r}
+create_distribution_plots <- function(targets_data) {
+  cat("Creating distribution plots...\n")
+  target_vars <- c("fat_percent", "protein_percent", "scc_thous_per_ml", "lactose_percent")
+  hist_plots <- map(target_vars, ~ {
+    targets_data %>%
+      ggplot(aes(x = !!sym(.x))) +
+      geom_histogram(aes(y = ..density..), bins = 30, alpha = 0.7, fill = "steelblue", color = "white") +
+      geom_density(color = "red", size = 1, alpha = 0.7) +
+      labs(
+        title = paste("Distribution of", str_replace(.x, "_", " ") %>% str_to_title()),
+        x = str_replace(.x, "_", " ") %>% str_to_title(),
+        y = "Density"
+      ) +
+      theme_minimal() +
+      theme(plot.title = element_text(size = 12, face = "bold"))
+  })
+  names(hist_plots) <- target_vars
+  combined_hist <- wrap_plots(hist_plots, ncol = 2)
+  print(combined_hist)
+  box_plots <- targets_data %>%
+    select(all_of(target_vars)) %>%
+    pivot_longer(everything(), names_to = "variable", values_to = "value") %>%
+    mutate(variable = str_replace(variable, "_", " ") %>% str_to_title()) %>%
+    ggplot(aes(x = variable, y = value, fill = variable)) +
+    geom_boxplot(alpha = 0.7, outlier.alpha = 0.6) +
+    facet_wrap(~variable, scales = "free", ncol = 2) +
+    labs(
+      title = "Box Plots of Target Variables",
+      x = "Variable",
+      y = "Value"
+    ) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_blank(),
+      legend.position = "none",
+      strip.text = element_text(face = "bold")
+    )
+  print(box_plots)
+  return(list(histograms = hist_plots, boxplots = box_plots))
+}
+```
+
+```{r}
+analyze_correlations <- function(targets_data) {
+  cat("Analyzing correlations between target variables...\n")
+  target_vars <- c("fat_percent", "protein_percent", "scc_thous_per_ml", "lactose_percent")
+  cor_matrix <- targets_data %>%
+    select(all_of(target_vars)) %>%
+    cor(use = "complete.obs")
+  
+  cat("Correlation Matrix:\n")
+  print(round(cor_matrix, 3))
+  cat("\n")
+  
+  corrplot(
+    cor_matrix, 
+    method = "color", 
+    type = "upper", 
+    order = "hclust",
+    tl.cex = 0.8, 
+    tl.col = "black",
+    addCoef.col = "black",
+    number.cex = 0.8,
+    title = "Correlation Matrix of Target Variables",
+    mar = c(0,0,2,0)
+    )
+  
+  pairs_plot <- targets_data %>%
+    select(all_of(target_vars)) %>%
+    ggpairs(
+      columnLabels = c("Fat %", "Protein %", "SCC (1000/ml)", "Lactose %"),
+      title = "Pairwise Relationships Between Target Variables"
+    ) +
+    theme_minimal()
+  
+  print(pairs_plot)
+  return(cor_matrix)
+}
+```
+
+```{r}
+analyze_by_groups <- function(targets_data) {
+  cat("Analyzing target variables by categorical groups...\n")
+  target_vars <- c("fat_percent", "protein_percent", "scc_thous_per_ml", "lactose_percent")
+  by_lactation <- targets_data %>%
+    group_by(lact) %>%
+    summarise(
+      n = n(),
+      across(all_of(target_vars), list(
+        mean = ~ mean(.x, na.rm = TRUE),
+        sd = ~ sd(.x, na.rm = TRUE)
+      ), .names = "{.col}_{.fn}"),
+      .groups = "drop"
+    )
+  
+  cat("Summary by Lactation Number:\n")
+  print(kable(by_lactation, digits = 3, format = "markdown"))
+  cat("\n")
+  
+  by_group <- targets_data %>%
+    group_by(grp) %>%
+    summarise(
+      n = n(),
+      across(all_of(target_vars), list(
+        mean = ~ mean(.x, na.rm = TRUE),
+        sd = ~ sd(.x, na.rm = TRUE)
+      ), .names = "{.col}_{.fn}"),
+      .groups = "drop"
+    )
+  
+  cat("Summary by Group:\n")
+  print(kable(by_group, digits = 3, format = "markdown"))
+  cat("\n")
+  
+  violin_lact <- targets_data %>%
+    select(lact, all_of(target_vars)) %>%
+    pivot_longer(cols = all_of(target_vars), names_to = "variable", values_to = "value") %>%
+    mutate(
+      variable = str_replace(variable, "_", " ") %>% str_to_title(),
+      lact = factor(lact)
+    ) %>%
+    ggplot(aes(x = lact, y = value, fill = lact)) +
+    geom_violin(alpha = 0.7) +
+    geom_boxplot(width = 0.2, alpha = 0.8) +
+    facet_wrap(~variable, scales = "free_y", ncol = 2) +
+    labs(
+      title = "Distribution of Target Variables by Lactation Number",
+      x = "Lactation Number",
+      y = "Value",
+      fill = "Lactation"
+    ) +
+    theme_minimal() +
+    theme(strip.text = element_text(face = "bold"))
+  
+  print(violin_lact)
+  
+  violin_group <- targets_data %>%
+    select(grp, all_of(target_vars)) %>%
+    pivot_longer(cols = all_of(target_vars), names_to = "variable", values_to = "value") %>%
+    mutate(variable = str_replace(variable, "_", " ") %>% str_to_title()) %>%
+    ggplot(aes(x = grp, y = value, fill = grp)) +
+    geom_violin(alpha = 0.7) +
+    geom_boxplot(width = 0.2, alpha = 0.8) +
+    facet_wrap(~variable, scales = "free_y", ncol = 2) +
+    labs(
+      title = "Distribution of Target Variables by Group",
+      x = "Group",
+      y = "Value",
+      fill = "Group"
+    ) +
+    theme_minimal() +
+    theme(strip.text = element_text(face = "bold"))
+  
+  print(violin_group)
+  
+  return(list(
+    by_lactation = by_lactation,
+    by_group = by_group,
+    violin_lact = violin_lact,
+    violin_group = violin_group
+  ))
+}
+```
+
+```{r}
+identify_outliers <- function(targets_data) {
+  cat("Identifying outliers in target variables...\n")
+  target_vars <- c("fat_percent", "protein_percent", "scc_thous_per_ml", "lactose_percent")
+  
+  outlier_summary <- map_dfr(target_vars, ~ {
+    var_data <- targets_data[[.x]]
+    q1 <- quantile(var_data, 0.25, na.rm = TRUE)
+    q3 <- quantile(var_data, 0.75, na.rm = TRUE)
+    iqr <- q3 - q1
+    lower_bound <- q1 - 1.5 * iqr
+    upper_bound <- q3 + 1.5 * iqr
+    
+    outliers <- which(var_data < lower_bound | var_data > upper_bound)
+    
+    tibble(
+      variable = .x,
+      n_outliers = length(outliers),
+      outlier_percentage = round(length(outliers) / length(var_data) * 100, 2),
+      lower_bound = round(lower_bound, 3),
+      upper_bound = round(upper_bound, 3),
+      min_outlier = ifelse(length(outliers) > 0, round(min(var_data[outliers]), 3), NA),
+      max_outlier = ifelse(length(outliers) > 0, round(max(var_data[outliers]), 3), NA)
+    )
+  })
+  
+  cat("Outlier Summary (using IQR method):\n")
+  print(kable(outlier_summary, format = "markdown"))
+  cat("\n")
+  return(outlier_summary)
+}
+```
+
+```{r}
+run_descriptive_analysis <- function(nir_data) {
+  cat("Starting comprehensive descriptive analysis of target variables...\n\n")
+  stats_results <- calculate_target_statistics(nir_data)
+  dist_plots <- create_distribution_plots(stats_results$targets_data)
+  correlations <- analyze_correlations(stats_results$targets_data)
+  group_analysis <- analyze_by_groups(stats_results$targets_data)
+  outliers <- identify_outliers(stats_results$targets_data)
+  
+  cat("=== Comprehensive Data Summary (skimr) ===\n")
+  target_vars <- c("fat_percent", "protein_percent", "scc_thous_per_ml", "lactose_percent")
+  skim_summary <- stats_results$targets_data %>%
+    select(all_of(target_vars)) %>%
+    skim()
+  
+  print(skim_summary)
+  
+  cat("\n=== Analysis Complete ===\n")
+  cat("Key Insights:\n")
+  cat("- Total samples analyzed:", nrow(stats_results$targets_data), "\n")
+  cat("- Variables analyzed:", length(target_vars), "\n")
+  cat("- Correlation range:", round(min(correlations[correlations != 1]), 3), 
+      "to", round(max(correlations[correlations != 1]), 3), "\n")
+  
+  return(list(
+    summary_stats = stats_results$summary_stats,
+    targets_data = stats_results$targets_data,
+    distributions = dist_plots,
+    correlations = correlations,
+    group_analysis = group_analysis,
+    outliers = outliers,
+    skim_summary = skim_summary
+  ))
+}
+```
+
+
+```{r}
+descriptive_results <- run_descriptive_analysis(nir_data)
+cat("\n=== Quick Summary ===\n")
+cat("Mean values:\n")
+descriptive_results$summary_stats %>%
+  select(variable, mean) %>%
+  mutate(mean = round(mean, 3)) %>%
+  print()
+
+cat("\nCoefficient of Variation (CV%):\n")
+descriptive_results$summary_stats %>%
+  select(variable, cv) %>%
+  mutate(cv = round(cv, 2)) %>%
+  arrange(desc(cv)) %>%
+  print()
+```
+
+### PCA analysis of milk quality targets
+
+```{r}
+prepare_pca_data <- function(nir_data) {
+  cat("=== Preparing Data for PCA Analysis ===\n")
+  pca_data <- nir_data$lab_results %>%
+    select(
+      fat_percent, protein_percent, scc_thous_per_ml, lactose_percent,
+      dim_days, daily_milking, milk_wt_lbs,
+      lact, grp, tube_number
+    ) %>%
+    filter(
+      !is.na(fat_percent), 
+      !is.na(protein_percent), 
+      !is.na(scc_thous_per_ml), 
+      !is.na(lactose_percent)
+    ) %>%
+    mutate(
+      lact = factor(lact),
+      grp = factor(grp)
+    )
+  cat("Dataset dimensions:", nrow(pca_data), "samples x", ncol(pca_data), "variables\n")
+  cat("Target variables: fat_percent, protein_percent, scc_thous_per_ml, lactose_percent\n")
+  cat("Additional quantitative variables: dim_days, daily_milking, milk_wt_lbs\n")
+  cat("Supplementary categorical variables: lact, grp\n\n")
+  return(pca_data)
+}
+```
+
+```{r}
+run_pca_analysis <- function(pca_data, scale_data = TRUE) {
+  cat("=== Running PCA Analysis ===\n")
+  quanti_vars <- c(
+    "fat_percent", "protein_percent", "scc_thous_per_ml", "lactose_percent",
+    "dim_days", "daily_milking", "milk_wt_lbs"
+    )
+  quali_vars <- c("lact", "grp")
+  quanti_indices <- which(names(pca_data) %in% quanti_vars)
+  quali_indices <- which(names(pca_data) %in% quali_vars)
+  pca_result <- PCA(
+    pca_data,
+    scale.unit = scale_data,
+    quanti.sup = if(length(setdiff(quanti_indices, 1:4)) > 0) setdiff(quanti_indices, 1:4) else NULL,
+    quali.sup = quali_indices,
+    graph = FALSE
+  )
+  cat("PCA completed successfully!\n")
+  cat("Number of components:", ncol(pca_result$var$coord), "\n")
+  cat("Scaling applied:", scale_data, "\n\n")
+  return(pca_result)
+}
+```
+
+```{r}
+analyze_eigenvalues <- function(pca_result) {
+  cat("=== Eigenvalue Analysis ===\n")
+  eigenvalues <- get_eigenvalue(pca_result)
+  print(round(eigenvalues, 3))
+  cat("\n")
+  
+  scree_plot <- fviz_eig(
+    pca_result, 
+    addlabels = TRUE, 
+    ylim = c(0, 50),
+    title = "Scree Plot - Variance Explained by Each Component",
+    xlab = "Principal Components",
+    ylab = "Percentage of Variance Explained"
+    ) +
+    theme_minimal() +
+    geom_hline(yintercept = 10, linetype = "dashed", color = "red", alpha = 0.7) +
+    labs(caption = "Red line indicates 10% variance threshold")
+  
+  print(scree_plot)
+  
+  cum_var_plot <- as.data.frame(eigenvalues) %>%
+    mutate(component = 1:nrow(.)) %>%
+    ggplot(aes(x = component, y = cumulative.variance.percent)) +
+    geom_line(size = 1.2, color = "steelblue") +
+    geom_point(size = 3, color = "steelblue") +
+    geom_hline(yintercept = 80, linetype = "dashed", color = "red", alpha = 0.7) +
+    scale_x_continuous(breaks = 1:nrow(eigenvalues)) +
+    labs(
+      title = "Cumulative Variance Explained",
+      x = "Principal Components",
+      y = "Cumulative Variance (%)",
+      caption = "Red line indicates 80% variance threshold"
+    ) +
+    theme_minimal()
+  
+  print(cum_var_plot)
+  return(eigenvalues)
+}
+```
+
+```{r}
+analyze_variable_contributions <- function(pca_result) {
+  cat("=== Variable Contributions Analysis ===\n")
+  var_contrib <- get_pca_var(pca_result)
+  
+  cat("Variable coordinates on PC1 and PC2:\n")
+  print(round(var_contrib$coord[, 1:2], 3))
+  cat("\n")
+  
+  cat("Variable contributions to PC1 and PC2 (%):\n")
+  print(round(var_contrib$contrib[, 1:2], 2))
+  cat("\n")
+  
+  cat("Cos2 (quality of representation) for PC1 and PC2:\n")
+  print(round(var_contrib$cos2[, 1:2], 3))
+  cat("\n")
+  
+  contrib_pc1 <- fviz_contrib(
+    pca_result, 
+    choice = "var", 
+    axes = 1, 
+    top = 10,
+    title = "Variable Contributions to PC1",
+    fill = "steelblue", 
+    color = "steelblue"
+    ) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  contrib_pc2 <- fviz_contrib(
+    pca_result, 
+    choice = "var", 
+    axes = 2, 
+    top = 10,
+    title = "Variable Contributions to PC2", 
+    fill = "coral", 
+    color = "coral"
+    ) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  print(contrib_pc1)
+  print(contrib_pc2)
+  
+  contrib_combined <- fviz_contrib(
+    pca_result, 
+    choice = "var", 
+    axes = 1:2,
+    title = "Variable Contributions to PC1 and PC2",
+    fill = "darkgreen",
+    color = "darkgreen"
+    ) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  print(contrib_combined)
+  return(var_contrib)
+}
+```
+
+```{r}
+create_pca_biplots <- function(pca_result, pca_data) {
+  cat("=== Creating PCA Biplots ===\n")
+  biplot_basic <- fviz_pca_biplot(
+    pca_result,
+    repel = TRUE,
+    col.var = "contrib",
+    gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+    title = "PCA Biplot - Variables and Individuals",
+    legend.title = "Contribution"
+    ) +
+    theme_minimal()
+  
+  print(biplot_basic)
+  
+  biplot_lact <- fviz_pca_ind(
+    pca_result,
+    col.ind = pca_data$lact,
+    palette = "jco",
+    addEllipses = TRUE,
+    legend.title = "Lactation Number",
+    title = "PCA - Individuals Colored by Lactation Number",
+    repel = TRUE
+    ) +
+    theme_minimal()
+  
+  print(biplot_lact)
+  
+  biplot_group <- fviz_pca_ind(
+    pca_result,
+    col.ind = pca_data$grp,
+    palette = "Dark2",
+    addEllipses = TRUE,
+    legend.title = "Group",
+    title = "PCA - Individuals Colored by Group",
+    repel = TRUE
+    ) +
+    theme_minimal()
+  
+  print(biplot_group)
+  
+  var_plot <- fviz_pca_var(
+    pca_result,
+    col.var = "cos2",
+    gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+    repel = TRUE,
+    title = "PCA - Variables Factor Map",
+    legend.title = "Cos2"
+    ) +
+    theme_minimal()
+  
+  print(var_plot)
+  
+  return(list(
+    biplot_basic = biplot_basic,
+    biplot_lact = biplot_lact,
+    biplot_group = biplot_group,
+    var_plot = var_plot
+  ))
+}
+```
+
+```{r}
+analyze_supplementary_variables <- function(pca_result) {
+  cat("=== Supplementary Variables Analysis ===\n")
+  if (!is.null(pca_result$quanti.sup)) {
+    cat("Supplementary Quantitative Variables Coordinates:\n")
+    print(round(pca_result$quanti.sup$coord[, 1:2], 3))
+    cat("\n")
+    sup_quanti_plot <- fviz_pca_var(
+      pca_result, choice = "quanti.sup",
+      col.var = "steelblue",
+      repel = TRUE,
+      title = "Supplementary Quantitative Variables"
+      ) +
+      theme_minimal()
+    print(sup_quanti_plot)
+  }
+  
+  if (!is.null(pca_result$quali.sup)) {
+    cat("Supplementary Qualitative Variables:\n")
+    cat("Coordinates of category centroids:\n")
+    print(round(pca_result$quali.sup$coord[, 1:2], 3))
+    cat("\n")
+    
+    cat("Cos2 of categories:\n")
+    print(round(pca_result$quali.sup$cos2[, 1:2], 3))
+    cat("\n")
+    sup_quali_plot <- fviz_pca_var(
+      pca_result, choice = "quali.sup",
+      col.var = "coral",
+      repel = TRUE,
+      title = "Supplementary Qualitative Variables"
+      ) +
+      theme_minimal()
+    print(sup_quali_plot)
+  }
+}
+```
+
+```{r}
+interpret_pca_results <- function(pca_result, eigenvalues, var_contrib) {
+  cat("=== PCA Results Interpretation ===\n")
+  
+   if (is.matrix(eigenvalues)) {
+    eigenvalues <- as.data.frame(eigenvalues)
+  }
+  
+  cat("COMPONENT INTERPRETATION:\n")
+  cat("------------------------\n")
+  pc1_vars <- var_contrib$contrib[, 1]
+  pc1_top <- names(sort(pc1_vars, decreasing = TRUE))[1:3]
+  cat(sprintf("PC1 (%.1f%% variance):\n", eigenvalues$variance.percent[1]))
+  cat("- Main contributors:", paste(pc1_top, collapse = ", "), "\n")
+  cat("- Loadings (coordinates):\n")
+  for (var in pc1_top) {
+    cat(sprintf("  %s: %.3f\n", var, var_contrib$coord[var, 1]))
+  }
+  cat("\n")
+  pc2_vars <- var_contrib$contrib[, 2]
+  pc2_top <- names(sort(pc2_vars, decreasing = TRUE))[1:3]
+  cat(sprintf("PC2 (%.1f%% variance):\n", eigenvalues$variance.percent[2]))
+  cat("- Main contributors:", paste(pc2_top, collapse = ", "), "\n")
+  cat("- Loadings (coordinates):\n")
+  for (var in pc2_top) {
+    cat(sprintf("  %s: %.3f\n", var, var_contrib$coord[var, 2]))
+  }
+  cat("\n")
+  cat("QUALITY OF REPRESENTATION (Cos2):\n")
+  cat("----------------------------------\n")
+  total_cos2 <- rowSums(var_contrib$cos2[, 1:2])
+  well_represented <- names(total_cos2[total_cos2 > 0.6])
+  poorly_represented <- names(total_cos2[total_cos2 < 0.4])
+  
+  if (length(well_represented) > 0) {
+    cat("Well represented variables (Cos2 > 0.6):", paste(well_represented, collapse = ", "), "\n")
+  }
+  if (length(poorly_represented) > 0) {
+    cat("Poorly represented variables (Cos2 < 0.4):", paste(poorly_represented, collapse = ", "), "\n")
+  }
+  cat("\n")
+  cat("SUMMARY:\n")
+  cat("--------\n")
+  cat(sprintf("- First two components explain %.1f%% of total variance\n", sum(eigenvalues$variance.percent[1:2])))
+  cat(sprintf("- Component 1 primarily represents: %s\n", paste(pc1_top[1:2], collapse = " and ")))
+  cat(sprintf("- Component 2 primarily represents: %s\n", paste(pc2_top[1:2], collapse = " and ")))
+  
+  return(list(
+    pc1_contributors = pc1_top,
+    pc2_contributors = pc2_top,
+    well_represented = well_represented,
+    poorly_represented = poorly_represented
+  ))
+}
+```
+
+```{r}
+create_correlation_circle <- function(pca_result) {
+  cat("Creating correlation circle...\n")
+  corr_circle <- fviz_pca_var(
+    pca_result,
+    col.var = "contrib",
+    gradient.cols = c("blue", "yellow", "red"),
+    repel = TRUE,
+    title = "Correlation Circle - Variable Relationships",
+    legend.title = "Contribution"
+    ) +
+    theme_minimal() +
+    geom_circle(
+      aes(x0 = 0, y0 = 0, r = 1), 
+      color = "gray",
+      linetype = "dashed",
+      inherit.aes = FALSE
+      ) +
+    xlim(-1.2, 1.2) + ylim(-1.2, 1.2)
+  print(corr_circle)
+  return(corr_circle)
+}
+```
+
+```{r}
+run_complete_pca_analysis <- function(nir_data) {
+  cat("=== Starting Complete PCA Analysis of Milk Quality Targets ===\n\n")
+  pca_data <- prepare_pca_data(nir_data)
+  pca_result <- run_pca_analysis(pca_data, scale_data = TRUE)
+  eigenvalues <- analyze_eigenvalues(pca_result)
+  var_contrib <- analyze_variable_contributions(pca_result)
+  biplots <- create_pca_biplots(pca_result, pca_data)
+  analyze_supplementary_variables(pca_result)
+  corr_circle <- create_correlation_circle(pca_result)
+  interpretation <- interpret_pca_results(pca_result, eigenvalues, var_contrib)
+  
+  cat("\n=== PCA Analysis Complete ===\n")
+  
+  return(list(
+    pca_result = pca_result,
+    pca_data = pca_data,
+    eigenvalues = eigenvalues,
+    var_contrib = var_contrib,
+    biplots = biplots,
+    corr_circle = corr_circle,
+    interpretation = interpretation
+  ))
+}
+```
+
+```{r}
+pca_analysis_results <- run_complete_pca_analysis(nir_data)
+
+if (is.matrix(pca_analysis_results$eigenvalues)) {
+  pca_analysis_results$eigenvalues <- as.data.frame(pca_analysis_results$eigenvalues)
+}
+
+cat("\n=== Quick PCA Summary ===\n")
+cat("Variance explained by PC1:", round(pca_analysis_results$eigenvalues$variance.percent[1], 1), "%\n")
+cat("Variance explained by PC2:", round(pca_analysis_results$eigenvalues$variance.percent[2], 1), "%\n")
+cat("Total variance explained by PC1+PC2:", 
+    round(sum(pca_analysis_results$eigenvalues$variance.percent[1:2]), 1), "%\n")
+cat("Main PC1 contributors:", paste(pca_analysis_results$interpretation$pc1_contributors[1:2], collapse = ", "), "\n")
+cat("Main PC2 contributors:", paste(pca_analysis_results$interpretation$pc2_contributors[1:2], collapse = ", "), "\n")
 ```
 
 ## Modeling
