@@ -1,58 +1,44 @@
 
--   [Milk Quality Spectroscopy](#milk-quality-spectroscopy)
--   [Dataset](#dataset)
-    -   [Key data components](#key-data-components)
-    -   [Important limitations](#important-limitations)
-    -   [Data evolution](#data-evolution)
-    -   [Data processing](#data-processing)
-        -   [Time series visualization](#time-series-visualization)
-        -   [Saturated spectra](#saturated-spectra)
-            -   [Detect and flag saturated
-                spectra](#detect-and-flag-saturated-spectra)
-            -   [Visualize saturation
-                patterns](#visualize-saturation-patterns)
-            -   [Interpolation method](#interpolation-method)
-            -   [Removal and capping
-                methods](#removal-and-capping-methods)
-    -   [Exploratory Data Analysis](#exploratory-data-analysis)
-        -   [Descriptive statistics for milk quality target
-            variables](#descriptive-statistics-for-milk-quality-target-variables)
-        -   [PCA analysis of milk quality
-            targets](#pca-analysis-of-milk-quality-targets)
-    -   [Modeling](#modeling)
-        -   [Data preparation](#data-preparation)
-        -   [Data splits and
-            preprocessing](#data-splits-and-preprocessing)
-        -   [Models tuning and
-            evaluation](#models-tuning-and-evaluation)
-        -   [Model performance
-            comparison](#model-performance-comparison)
-        -   [Prediction plots](#prediction-plots)
-        -   [Feature Importance](#feature-importance)
+- [Milk Quality Spectroscopy](#milk-quality-spectroscopy)
+- [Dataset](#dataset)
+  - [Key data components](#key-data-components)
+  - [Important limitations](#important-limitations)
+  - [Data evolution](#data-evolution)
+- [Data processing](#data-processing)
+  - [Observations by Sensor](#observations-by-sensor)
+  - [Measurement timeline](#measurement-timeline)
+  - [Spectra](#spectra)
+- [Exploratory Data Analysis](#exploratory-data-analysis)
+  - [Descriptive statistics for milk quality target
+    variables](#descriptive-statistics-for-milk-quality-target-variables)
+  - [PCA analysis of milk quality
+    targets](#pca-analysis-of-milk-quality-targets)
+- [Modeling](#modeling)
+  - [Data splits and preprocessing](#data-splits-and-preprocessing)
+  - [Models tuning and evaluation](#models-tuning-and-evaluation)
+  - [Model performance comparison](#model-performance-comparison)
+  - [Prediction plots](#prediction-plots)
+  - [Feature Importance](#feature-importance)
 
 <!-- README.md is generated from README.Rmd. Please edit that file -->
 
 # Milk Quality Spectroscopy
 
 <!-- badges: start -->
+
 <!-- badges: end -->
 
 ``` r
-if (requireNamespace("ggplot2", quietly = TRUE)) {
-  ggplot2::theme_set(ggplot2::theme_minimal(base_size = 12))
-}
-```
-
-``` r
-set.seed(123)
-```
-
-``` r
 suppressPackageStartupMessages({
+  library(HotellingEllipse)
+  library(ConfidenceEllipse)
   library(tidyverse)
+  library(magrittr)
+  library(reticulate)
   library(viridis)
   library(arrow)
   library(tidymodels)
+  library(future)
   library(corrplot)
   library(vip)
   library(patchwork)
@@ -64,8 +50,19 @@ suppressPackageStartupMessages({
   library(gridExtra)
   library(RColorBrewer)
   library(knitr)
+  library(naniar)
+  library(janitor)
   library(ggforce)
+  library(ranger)
+  library(glmnet)
+  library(xgboost)
+  library(mixOmics)
 })
+```
+
+``` r
+tidymodels_prefer()
+theme_set(theme_light(base_size = 12))
 ```
 
 # Dataset
@@ -73,10 +70,10 @@ suppressPackageStartupMessages({
 The data is structured by sensor/stall with each sensor directory
 containing:
 
--   **Lab results** (CSV format with tube_no as primary key)
--   **Sensor configuration** (wavelengths, calibration coefficients)
--   **Spectral measurements** (Parquet files, one per milk sample)
--   **Dark spectra** (reference measurements)
+- **Lab results** (CSV format with tube_no as primary key)
+- **Sensor configuration** (wavelengths, calibration coefficients)
+- **Spectral measurements** (Parquet files, one per milk sample)
+- **Dark spectra** (reference measurements)
 
 ## Key data components
 
@@ -93,10 +90,10 @@ measurement parameters that aren’t standardized across sensors.
 
 ## Important limitations
 
--   Temperature and LED measurements are raw ADC values, not
-    standardized between sensors
--   Each sensor measures different wavelengths
--   Some timing discrepancies remain due to clock source differences
+- Temperature and LED measurements are raw ADC values, not standardized
+  between sensors
+- Each sensor measures different wavelengths
+- Some timing discrepancies remain due to clock source differences
 
 ## Data evolution
 
@@ -104,1015 +101,440 @@ The dataset has evolved from initial CSV format to Parquet compression,
 with spectral data consolidated into array columns rather than
 individual wavelength columns for more efficient storage and processing.
 
-## Data processing
+# Data processing
+
+``` r
+set.seed(123)
+```
 
 ``` r
 dataset_path <- "Dataset/"
-read_sensor_csvs <- function(sensor_folder) {
-  sensor_path <- file.path(dataset_path, sensor_folder)
-  lab_results <- read_csv(file.path(sensor_path, "lab_results.csv"), show_col_types = FALSE)
-  lab_results$sensor <- sensor_folder
-  sensor_data <- read_csv(file.path(sensor_path, "sensor.csv"), show_col_types = FALSE)
-  sensor_data$sensor <- sensor_folder
-  return(list(lab_results = lab_results, sensor_data = sensor_data))
-}
+functions_path <- "~/Documents/GitHub/milk-quality-spectroscopy/R/"
 ```
 
 ``` r
-read_sensor_parquets <- function(sensor_folder) {
-  sensor_path <- file.path(dataset_path, sensor_folder)
-  dark_spectra_path <- file.path(sensor_path, "dark_spectra", "dark_spectra.parquet")
-  dark_spectra <- read_parquet(dark_spectra_path)
-  spectra_path <- file.path(sensor_path, "spectra")
-  tube_files <- list.files(spectra_path, pattern = "tube_no_\\d+\\.parquet$", full.names = TRUE)
-  tube_spectra_list <- map(tube_files, read_parquet)
-  names(tube_spectra_list) <- basename(tube_files)
-  dark_spectra$sensor <- sensor_folder
-  
-  tube_spectra_list <- map(tube_spectra_list, ~ {
-    .x$sensor <- sensor_folder
-    return(.x)
-  })
-  
-  return(list(dark_spectra = dark_spectra, tube_spectra = tube_spectra_list))
-}
-```
-
-``` r
-subtract_dark_spectrum <- function(tube_spectrum, dark_spectrum, verbose = FALSE) {
-  if (nrow(tube_spectrum) != nrow(dark_spectrum)) {
-    if (verbose) {
-      cat(
-        "Row count mismatch - Tube:",
-        nrow(tube_spectrum),
-        "Dark:",
-        nrow(dark_spectrum),
-        "- Trimming to",
-        min(nrow(tube_spectrum), nrow(dark_spectrum)),
-        "rows\n"
-      )
-    }
-    min_rows <- min(nrow(tube_spectrum), nrow(dark_spectrum))
-    tube_spectrum <- tube_spectrum[1:min_rows, ]
-    dark_spectrum <- dark_spectrum[1:min_rows, ]
-  }
-  spectral_cols <- names(tube_spectrum)[sapply(tube_spectrum, is.numeric)]
-  spectral_cols <- spectral_cols[spectral_cols != "sensor"]
-  corrected_spectrum <- tube_spectrum
-  
-  for (col in spectral_cols) {
-    if (col %in% names(dark_spectrum)) {
-      if (length(tube_spectrum[[col]]) == length(dark_spectrum[[col]])) {
-        corrected_spectrum[[col]] <- tube_spectrum[[col]] - dark_spectrum[[col]]
-      } else {
-        if (verbose) {
-          cat("Column", col, "length mismatch, skipping\n")
-        }
-      }
-    }
-  }
-  return(corrected_spectrum)
-}
-```
-
-``` r
-process_nir_data <- function(verbose = FALSE) {
-  sensor_folders <- paste0("sensor_", 1:12)
-  
-  cat("Processing CSV files...\n")
-  csv_data <- map(sensor_folders, read_sensor_csvs)
-  names(csv_data) <- sensor_folders
-  all_lab_results <- map_dfr(csv_data, ~ .x$lab_results)
-  all_sensor_data <- map_dfr(csv_data, ~ .x$sensor_data)
-  
-  cat("Processing parquet files...\n")
-  parquet_data <- map(sensor_folders, read_sensor_parquets)
-  names(parquet_data) <- sensor_folders
-  all_dark_spectra <- map_dfr(parquet_data, ~ .x$dark_spectra)
-  corrected_spectra_list <- list()
-  
-  for (sensor in sensor_folders) {
-    if (verbose) {
-      cat(paste("Processing", sensor, "...\n"))
-    } else {
-      cat(".")
-    }
-    
-    dark_spectrum <- parquet_data[[sensor]]$dark_spectra
-    tube_spectra <- parquet_data[[sensor]]$tube_spectra
-    corrected_tubes <- map(
-      tube_spectra,
-      ~ subtract_dark_spectrum(.x, dark_spectrum, verbose = verbose)
-      )
-    
-    for (i in seq_along(corrected_tubes)) {
-      tube_file <- names(corrected_tubes)[i]
-      tube_number <- gsub("tube_no_(\\d+)\\.parquet", "\\1", tube_file)
-      corrected_tubes[[i]]$tube_number <- tube_number
-    }
-    corrected_spectra_list[[sensor]] <- corrected_tubes
-  }
-  
-  cat("\n")
-  all_corrected_spectra <- map_dfr(corrected_spectra_list, ~ map_dfr(.x, identity))
-  cat("Data processing complete!\n")
-  
-  return(
-    list(
-      lab_results = all_lab_results,
-      sensor_data = all_sensor_data,
-      dark_spectra = all_dark_spectra,
-      corrected_spectra = all_corrected_spectra
-    )
-  )
-}
+source(paste0(functions_path, "read_sensor_csvs.R"))
+source(paste0(functions_path, "read_sensor_parquets.R"))
+source(paste0(functions_path, "subtract_dark_spectrum.R"))
+source(paste0(functions_path, "process_nir_data.R"))
 ```
 
 ``` r
 nir_data <- process_nir_data(verbose = FALSE)
+#> Beginning NIR data processing for 12 sensor(s)
 #> Processing CSV files...
 #> Processing parquet files...
-#> ............
+#> Performing baseline correction...
+#> .
+#> .
+#> .
+#> .
+#> .
+#> .
+#> .
+#> .
+#> .
+#> .
+#> .
+#> .
+#> 
 #> Data processing complete!
 ```
 
 ``` r
-cat("\n=== Data Summary ===\n")
-#> 
-#> === Data Summary ===
-cat("Lab results shape:", nrow(nir_data$lab_results), "x", ncol(nir_data$lab_results), "\n")
-#> Lab results shape: 1080 x 26
-cat("Sensor data shape:", nrow(nir_data$sensor_data), "x", ncol(nir_data$sensor_data), "\n")
-#> Sensor data shape: 12 x 11
-cat("Dark spectra shape:", nrow(nir_data$dark_spectra), "x", ncol(nir_data$dark_spectra), "\n")
-#> Dark spectra shape: 3991 x 9
-cat("Corrected spectra shape:", nrow(nir_data$corrected_spectra), "x", ncol(nir_data$corrected_spectra), "\n")
-#> Corrected spectra shape: 309142 x 13
-cat("\nUnique sensors in corrected spectra:", length(unique(nir_data$corrected_spectra$sensor)), "\n")
-#> 
-#> Unique sensors in corrected spectra: 12
-cat("Unique tube numbers:", length(unique(nir_data$corrected_spectra$tube_number)), "\n")
-#> Unique tube numbers: 1080
-```
-
-``` r
-nir_data$lab_results
-#> # A tibble: 1,080 × 26
-#>    tube_no barnname    rfid  lact grp   dim_days date       day_of_study
-#>      <dbl>    <dbl>   <dbl> <dbl> <chr>    <dbl> <date>            <dbl>
-#>  1       1     1126 8.40e14     1 A1         218 2025-06-30            1
-#>  2      13     1161 8.40e14     1 A1         129 2025-06-30            1
-#>  3      25     1181 8.40e14     1 A1          88 2025-06-30            1
-#>  4      37     1083 8.40e14     1 A1         248 2025-06-30            1
-#>  5      49     1149 8.40e14     1 A1          83 2025-06-30            1
-#>  6      61      616 8.40e14     4 B2         204 2025-06-30            1
-#>  7      73      456 8.40e14     5 B2         211 2025-06-30            1
-#>  8      85      408 8.40e14     5 B2         249 2025-06-30            1
-#>  9      97      746 8.40e14     3 B2          88 2025-06-30            1
-#> 10     109      913 8.40e14     2 B2         246 2025-06-30            1
-#> # ℹ 1,070 more rows
-#> # ℹ 18 more variables: daily_milking <dbl>, study_milking <dbl>,
-#> #   milking_end <chr>, avgmilkdur_mins <dbl>, milking_stall <dbl>,
-#> #   milk_wt_lbs <dbl>, tube_number <dbl>, date_1 <date>, fat_percent <dbl>,
-#> #   protein_percent <dbl>, scc_thous_per_ml <dbl>, lactose_percent <dbl>,
-#> #   other_solids_percent <dbl>, mun_mg_per_dl <dbl>,
-#> #   solids_not_fat_percent <dbl>, total_solids_percent <dbl>, endtime <dttm>, …
-```
-
-``` r
-nir_data$sensor_data
-#> # A tibble: 12 × 11
-#>    sensor_uid       pcba box_number adc_gain adc_offset stall_number stall_title
-#>    <chr>           <dbl>      <dbl>    <dbl>      <dbl>        <dbl> <chr>      
-#>  1 B182C08004014D…    24         33       39        511            1 East Offic…
-#>  2 B182C08004015A…    11          2       37        511            2 East       
-#>  3 B182C08004018F…    37         25       38        511            3 East       
-#>  4 B182C08004014A…    30         12       37        511            4 East       
-#>  5 B182C08004016C…    16         21       38        511            5 East       
-#>  6 B182C08004014E…    67         37       37        511            6 East-Entra…
-#>  7 B182C080040163…    36         56       37        511            7 West Offic…
-#>  8 B182C080040154…    15          4       39        511            8 West       
-#>  9 B182C080040169…    21         20       37        511            9 West       
-#> 10 B182C080040131…    14         24       37        511           10 West       
-#> 11 B182C08004013D…    19          1       37        511           11 West       
-#> 12 B182C080040191…    86         11       38        511           12 West Entra…
-#> # ℹ 4 more variables: imager_sn <dbl>, sensor_wavelength_coefficients <chr>,
-#> #   wavelengths_nm <chr>, sensor <chr>
-```
-
-### Time series visualization
-
-``` r
-visualize_all_sensors_temporal_summary <- function(nir_data) {
-  temporal_summary <- nir_data$corrected_spectra %>%
-    mutate(datetime = as.POSIXct(datetime)) %>%
-    group_by(sensor) %>%
-    summarise(
-      n_measurements = n(),
-      n_unique_tubes = n_distinct(tube_number),
-      min_time = min(datetime),
-      max_time = max(datetime),
-      time_span_hours = as.numeric(difftime(max(datetime), min(datetime), units = "hours")),
-      .groups = "drop"
+sensor_wavelengths_list <- nir_data$sensor_data %>%
+  select(sensor, wavelengths_nm) %>%
+  mutate(
+    wavelength_chars = 
+      str_remove_all(wavelengths_nm, "\\[|\\]") %>%
+      str_split(",\\s*")
     ) %>%
-    mutate(avg_measurements_per_tube = round(n_measurements / n_unique_tubes, 2))
-  print(temporal_summary)
-  
-  p_timeline <- nir_data$corrected_spectra %>%
-    mutate(datetime = as.POSIXct(datetime)) %>%
-    ggplot(aes(x = datetime, y = sensor, color = sensor)) +
-    geom_point(alpha = 0.6, size = .5) +
-    ggsci::scale_color_ucscgb() +
-    labs(
-      title = "Measurement Timeline Across All Sensors",
-      x = "Date/Time",
-      y = " ",
-      caption = "Each point represents one spectral measurement"
-    ) +
-    theme_minimal() +
-    theme(legend.position = "none")
-  
-  print(p_timeline)
-  return(list(summary = temporal_summary, timeline_plot = p_timeline))
-}
+  select(sensor, wavelength_chars) %>%
+  deframe()
+glimpse(sensor_wavelengths_list)
+#> List of 12
+#>  $ sensor_1 : chr [1:256] "1102.48400000000000" "1100.53794135426760" "1098.58643980292190" "1096.62951676449700" ...
+#>  $ sensor_2 : chr [1:256] "1104.60600000000000" "1102.66384679686280" "1100.71620229780360" "1098.76308899488120" ...
+#>  $ sensor_3 : chr [1:256] "1102.49500000000000" "1100.56771816807170" "1098.63488862546700" "1096.69653512396700" ...
+#>  $ sensor_4 : chr [1:256] "1104.83000000000000" "1102.89167366047600" "1100.94788909409820" "1098.99866782230830" ...
+#>  $ sensor_5 : chr [1:256] "1107.49900000000000" "1105.54832734868140" "1103.59228348050350" "1101.63088936899900" ...
+#>  $ sensor_6 : chr [1:256] "1108.29400000000000" "1106.35145327512240" "1104.40326972299730" "1102.44947410192780" ...
+#>  $ sensor_7 : chr [1:256] "1104.05400000000000" "1102.10089969738800" "1100.14251262580890" "1098.17885937473240" ...
+#>  $ sensor_8 : chr [1:256] "1101.92000000000000" "1099.96655459786960" "1098.00787087855250" "1096.04396742775100" ...
+#>  $ sensor_9 : chr [1:256] "1104.15900000000000" "1102.21117815077630" "1100.25777023946000" "1098.29880252539530" ...
+#>  $ sensor_10: chr [1:256] "1104.58800000000000" "1102.64621399433140" "1100.69857594194240" "1098.74511558116340" ...
+#>  $ sensor_11: chr [1:256] "1108.57200000000000" "1106.62058414727100" "1104.66367329538120" "1102.70129231749750" ...
+#>  $ sensor_12: chr [1:256] "1101.54000000000000" "1099.63013863556880" "1097.71472921430300" "1095.79379358618300" ...
 ```
 
 ``` r
-all_sensors_summary <- visualize_all_sensors_temporal_summary(nir_data)
-#> # A tibble: 12 × 7
-#>    sensor  n_measurements n_unique_tubes min_time            max_time           
-#>    <chr>            <int>          <int> <dttm>              <dttm>             
-#>  1 sensor…          25124             90 2025-06-30 22:43:44 2025-07-03 16:49:55
-#>  2 sensor…          26353             90 2025-06-30 22:49:27 2025-07-03 16:47:42
-#>  3 sensor…          26306             90 2025-06-30 22:49:40 2025-07-03 16:50:59
-#>  4 sensor…          26820             90 2025-06-30 22:50:23 2025-07-03 16:51:14
-#>  5 sensor…          23778             90 2025-06-30 22:43:59 2025-07-03 16:56:57
-#>  6 sensor…          25791             90 2025-06-30 22:44:42 2025-07-03 16:50:31
-#>  7 sensor…          25719             90 2025-06-30 22:39:36 2025-07-03 16:49:00
-#>  8 sensor…          26679             90 2025-06-30 22:38:43 2025-07-03 16:50:48
-#>  9 sensor…          26038             90 2025-06-30 22:45:30 2025-07-03 16:51:16
-#> 10 sensor…          25764             90 2025-06-30 22:50:03 2025-07-03 16:49:00
-#> 11 sensor…          25651             90 2025-06-30 22:48:41 2025-07-03 16:50:05
-#> 12 sensor…          25119             90 2025-06-30 22:49:05 2025-07-03 16:47:37
-#> # ℹ 2 more variables: time_span_hours <dbl>, avg_measurements_per_tube <dbl>
-```
-
-<img src="man/figures/README-unnamed-chunk-14-1.png" width="100%" style="display: block; margin: auto;" />
-
-``` r
-visualize_nirs_time_series <- function(
-    nir_data,
-    target_sensor = "sensor_1",
-    min_measurements = 2
-    ) {
-  sensor_data <- nir_data$corrected_spectra %>%
-    filter(sensor == target_sensor) %>%
-    mutate(datetime = as.POSIXct(datetime))
-  
-  cat("=== Time Series Analysis for", target_sensor, "===\n")
-  cat("Total measurements:", nrow(sensor_data), "\n")
-  
-  repeated_samples <- sensor_data %>%
-    group_by(tube_number) %>%
-    summarise(
-      n_measurements = n(),
-      time_span = difftime(max(datetime), min(datetime), units = "hours"),
-      first_measurement = min(datetime),
-      last_measurement = max(datetime),
-      .groups = "drop"
-    ) %>%
-    filter(n_measurements >= min_measurements) %>%
-    arrange(desc(n_measurements))
-  
-  cat(
-    "Samples with",
-    min_measurements,
-    "or more measurements:",
-    nrow(repeated_samples),
-    "\n"
-  )
-  
-  if (nrow(repeated_samples) == 0) {
-    cat("No samples found with repeated measurements for time series analysis.\n")
-    cat("Showing measurement frequency instead...\n")
-    
-    p1 <- sensor_data %>%
-      ggplot(aes(x = datetime)) +
-      geom_histogram(bins = 30, fill = "steelblue", alpha = 0.7) +
-      labs(
-        title = paste("Measurement Frequency Over Time -", target_sensor),
-        x = "Date/Time",
-        y = "Number of Measurements"
-      ) +
-      theme_minimal()
-    
-    print(p1)
-    return(list(repeated_samples = repeated_samples, plot = p1))
-  }
-  
-  samples_to_plot <- repeated_samples %>%
-    slice_head(n = 5) %>%
-    pull(tube_number)
-  
-  cat(
-    "\nPlotting time series for tubes:",
-    paste(samples_to_plot, collapse = ", "),
-    "\n"
+spec_data <- nir_data$corrected_spectra %>%
+  filter(spec_type == "SAMPLE") %>%
+  select(tube_number, sensor, spec_array) %>%
+  modify_at("tube_number", as_factor) %>%
+  modify_at("sensor", as_factor) %>%
+  mutate(
+    spec_valid = case_when(
+      map_lgl(spec_array, is.null) ~ FALSE,
+      map_int(spec_array, length) == 0 ~ FALSE,
+      map_lgl(spec_array, ~ all(is.na(.x))) ~ FALSE,
+      TRUE ~ TRUE
     )
-  
-  time_series_data <- sensor_data %>%
-    filter(tube_number %in% samples_to_plot) %>%
-    arrange(tube_number, datetime)
-  
-  extract_spectral_data <- function(data) {
-    spectral_list <- list()
-    for (i in 1:nrow(data)) {
-      spec_array <- data$spec_array[[i]]
-      spec_df <- data.frame(
-        wavelength_index = 1:length(spec_array),
-        intensity = as.numeric(spec_array),
-        tube_number = data$tube_number[i],
-        datetime = data$datetime[i],
-        measurement_id = paste(data$tube_number[i], data$datetime[i])
+  ) %>%
+  filter(spec_valid) %>%
+  rowwise() %>%
+  mutate(
+    df = list({
+      tryCatch(
+        {
+          values <- as.numeric(unlist(spec_array))
+          valid_values <- values[!is.na(values)]
+          if (length(valid_values) > 0) {
+            setNames(valid_values, paste0("X", seq_along(valid_values)))
+          } else {
+            NULL
+          }
+        },
+        error = function(e) {
+          NULL
+        }
       )
-      spectral_list[[i]] <- spec_df
-    }
-    do.call(rbind, spectral_list)
-  }
-  
-  spectral_data <- extract_spectral_data(time_series_data)
-  
-  p2 <- spectral_data %>%
-    ggplot(aes(
-      x = wavelength_index,
-      y = intensity,
-      color = datetime,
-      group = measurement_id
-    )) +
-    geom_line(alpha = 0.7, size = 0.5) +
-    facet_wrap(
-      ~ tube_number,
-      scales = "free_y",
-      labeller = labeller(
-        tube_number = function(x)
-          paste("Tube", x)
-      )
-    ) +
-    scale_color_viridis_c(name = "Time", trans = "time") +
+    })
+  ) %>%
+  ungroup() %>%
+  filter(!map_lgl(df, is.null)) %>%
+  select(-spec_array, -spec_valid) %>%
+  unnest_wider(df) %>%
+  relocate(sensor, .before = tube_number)
+print(spec_data)
+#> # A tibble: 77,986 × 258
+#>    sensor   tube_number    X1    X2    X3    X4    X5    X6    X7    X8    X9
+#>    <fct>    <fct>       <dbl> <dbl> <dbl> <dbl> <dbl> <dbl> <dbl> <dbl> <dbl>
+#>  1 sensor_1 1            7877  7852  7910  7681  8013  8038  7750  7715  7928
+#>  2 sensor_1 1            8050  7832  7825  8153  8085  8033  8050  7890  7934
+#>  3 sensor_1 1            7730  7872  7788  7815  7922  7719  7944  7780  7683
+#>  4 sensor_1 1            7856  7725  7738  7816  7868  7890  7924  7865  7802
+#>  5 sensor_1 1            7941  7867  7858  7928  7727  7996  7807  7977  7952
+#>  6 sensor_1 1            8010  7768  7749  7908  7904  8011  8028  7826  7852
+#>  7 sensor_1 1            7754  7796  7903  7888  7893  7852  7798  7821  7896
+#>  8 sensor_1 1            8306  8270  8244  8212  7897  8261  8327  8334  8404
+#>  9 sensor_1 1            7792  7796  7888  7934  7918  7722  7866  7862  7914
+#> 10 sensor_1 1            7814  7811  7838  7879  7938  7709  7920  7857  7844
+#> # ℹ 77,976 more rows
+#> # ℹ 247 more variables: X10 <dbl>, X11 <dbl>, X12 <dbl>, X13 <dbl>, X14 <dbl>,
+#> #   X15 <dbl>, X16 <dbl>, X17 <dbl>, X18 <dbl>, X19 <dbl>, X20 <dbl>,
+#> #   X21 <dbl>, X22 <dbl>, X23 <dbl>, X24 <dbl>, X25 <dbl>, X26 <dbl>,
+#> #   X27 <dbl>, X28 <dbl>, X29 <dbl>, X30 <dbl>, X31 <dbl>, X32 <dbl>,
+#> #   X33 <dbl>, X34 <dbl>, X35 <dbl>, X36 <dbl>, X37 <dbl>, X38 <dbl>,
+#> #   X39 <dbl>, X40 <dbl>, X41 <dbl>, X42 <dbl>, X43 <dbl>, X44 <dbl>, …
+```
+
+``` r
+lab_data <- nir_data$lab_results %>%
+  select(
+    sensor,
+    tube_number,
+    fat_percent,
+    protein_percent,
+    scc_thous_per_ml,
+    lactose_percent,
+    milk_wt_lbs,
+    other_solids_percent,
+    solids_not_fat_percent,
+    total_solids_percent
+  ) %>%
+  modify_at("tube_number", as_factor) %>%
+  modify_at("sensor", as_factor) %>%
+  filter(
+    !is.na(fat_percent),
+    !is.na(protein_percent),
+    !is.na(scc_thous_per_ml),
+    !is.na(lactose_percent)
+  ) %>%
+  rename(
+    fat = fat_percent,
+    protein = protein_percent,
+    scc = scc_thous_per_ml,
+    lactose = lactose_percent,
+    weight = milk_wt_lbs,
+    misc_solids = other_solids_percent,
+    nonfat_solids = solids_not_fat_percent,
+    tot_solids = total_solids_percent
+  ) %>%
+  print()
+#> # A tibble: 1,080 × 10
+#>    sensor   tube_number   fat protein   scc lactose weight misc_solids
+#>    <fct>    <fct>       <dbl>   <dbl> <dbl>   <dbl>  <dbl>       <dbl>
+#>  1 sensor_1 1             4.4     3.1     9     4.5   27.7         5.6
+#>  2 sensor_1 13            4       3.4   620     4.8   30.4         5.9
+#>  3 sensor_1 25            3.5     2.9   593     5     28.6         6.1
+#>  4 sensor_1 37            4.3     3.1    11     4.8   29.8         6  
+#>  5 sensor_1 49            2.2     2.5   394     4.7   46.5         5.8
+#>  6 sensor_1 61            4.1     3       9     5     34.2         6.1
+#>  7 sensor_1 73            3.6     3.1     8     4.9   33           6  
+#>  8 sensor_1 85            3.5     3.1   226     4.7   29.7         5.8
+#>  9 sensor_1 97            3.1     2.6    13     5     47.8         6.1
+#> 10 sensor_1 109           4.7     3.3    12     4.7   28           5.9
+#> # ℹ 1,070 more rows
+#> # ℹ 2 more variables: nonfat_solids <dbl>, tot_solids <dbl>
+```
+
+``` r
+targets <- lab_data %>% select(fat, protein, scc, lactose) %>% names()
+meta <- lab_data %>% select(-sensor, -tube_number, -all_of(targets)) %>% names()
+```
+
+``` r
+modeling_data <- spec_data %>%
+  left_join(lab_data, by = c("sensor", "tube_number")) %>%
+  filter(if_all(starts_with("X_"), ~ !is.na(.x))) %>%
+  relocate(sensor, .before = tube_number) %>%
+  relocate(all_of(targets), .after = tube_number) %>%
+  relocate(all_of(meta), .after = all_of(targets))
+```
+
+``` r
+cat("Final dataset dimensions:", nrow(modeling_data), "x", ncol(modeling_data), "\n")
+#> Final dataset dimensions: 77986 x 266
+cat("Number of wavelenghts:", sum(grepl("^X", names(modeling_data))), "\n")
+#> Number of wavelenghts: 256
+```
+
+``` r
+modeling_data %>%
+  select(sensor, starts_with("X")) %>%
+  group_by(sensor) %>%
+  summarise(
+    observations = n(),
+    variables = ncol(.) - 1,
+    total_cells = n() * ncol(.),
+    missing_values = sum(is.na(.)),
+    completeness = round((1 - sum(is.na(.)) / (n() * ncol(.))) * 100, 1),
+    .groups = 'drop'
+  ) %>%
+  arrange(sensor)
+#> # A tibble: 12 × 6
+#>    sensor    observations variables total_cells missing_values completeness
+#>    <fct>            <int>     <dbl>       <int>          <int>        <dbl>
+#>  1 sensor_1          7264       256     1866848              0          100
+#>  2 sensor_2          5914       256     1519898              0          100
+#>  3 sensor_3          4349       256     1117693              0          100
+#>  4 sensor_4         12575       256     3231775              0          100
+#>  5 sensor_5          4025       256     1034425              0          100
+#>  6 sensor_6          5267       256     1353619              0          100
+#>  7 sensor_7          6046       256     1553822              0          100
+#>  8 sensor_8          5905       256     1517585              0          100
+#>  9 sensor_9          8378       256     2153146              0          100
+#> 10 sensor_10         6629       256     1703653              0          100
+#> 11 sensor_11         4212       256     1082484              0          100
+#> 12 sensor_12         7422       256     1907454              0          100
+```
+
+## Observations by Sensor
+
+``` r
+sensor_summary <- modeling_data %>%
+    select(sensor, tube_number, starts_with("X")) %>%
+    group_by(sensor, tube_number) %>%
+    summarise(
+        observations = n(),
+        variables = ncol(.) - 2,
+        .groups = 'drop'
+    )
+```
+
+``` r
+sensor_summary %>%
+    group_by(sensor) %>%
+    summarise(total_obs = sum(observations), .groups = 'drop') %>%
+    mutate(sensor_num = as.numeric(str_extract(sensor, "\\d+"))) %>%
+    arrange(sensor_num) %>%
+    ggplot(aes(x = reorder(sensor, sensor_num), y = total_obs)) +
+    geom_col(fill = "steelblue", alpha = 0.8) +
+    geom_text(
+      aes(label = scales::comma(total_obs)),
+      vjust = -0.3, 
+      size = 3.5, 
+      fontface = "bold"
+      ) +
     labs(
-      title = paste("NIRS Spectra Time Series -", target_sensor),
-      subtitle = "Each line represents a spectrum at a different time point",
-      x = "Wavelength Index",
-      y = "Corrected Intensity",
-      caption = "Colors represent measurement time (darker = earlier, lighter = later)"
+        title = "Total Observations by Sensor",
+        subtitle = "Comparison across all 12 sensors",
+        x = "",
+        y = "Total Observations"
     ) +
     theme_minimal() +
     theme(
-      strip.text = element_text(size = 10, face = "bold"),
-      legend.position = "bottom")
-  print(p2)
-}
-```
-
-``` r
-visualize_nirs_time_series(nir_data, "sensor_1", min_measurements = 2)
-#> === Time Series Analysis for sensor_1 ===
-#> Total measurements: 25124 
-#> Samples with 2 or more measurements: 90 
-#> 
-#> Plotting time series for tubes: 1, 1021, 1057, 109, 169
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(face = "bold", size = 14),
+        panel.grid.minor = element_blank()
+    ) +
+    scale_y_continuous(labels = scales::comma)
 ```
 
 <img src="man/figures/README-unnamed-chunk-16-1.png" width="100%" style="display: block; margin: auto;" />
 
-### Saturated spectra
-
 ``` r
-detect_and_handle_saturation <- function(nir_data,
-                                         saturation_threshold = 60000,
-                                         saturation_percentage = 0.05,
-                                         method = "flag") {
-  cat("=== Saturation Detection and Handling ===\n")
-  is_saturated <- function(spec_array,
-                           threshold = saturation_threshold,
-                           percentage = saturation_percentage) {
-    if (is.null(spec_array) || length(spec_array) == 0)
-      return(FALSE)
-    n_saturated <- sum(spec_array >= threshold, na.rm = TRUE)
-    saturation_ratio <- n_saturated / length(spec_array)
-    return(saturation_ratio >= percentage)
-  }
-  
-  corrected_data <- nir_data$corrected_spectra %>%
-    rowwise() %>%
-    mutate(
-      max_intensity = max(spec_array, na.rm = TRUE),
-      mean_intensity = mean(spec_array, na.rm = TRUE),
-      is_saturated = is_saturated(spec_array, saturation_threshold, saturation_percentage),
-      n_saturated_points = sum(spec_array >= saturation_threshold, na.rm = TRUE),
-      saturation_percentage = n_saturated_points / length(spec_array) * 100
-    ) %>%
-    ungroup()
-  
-  saturation_summary <- corrected_data %>%
-    group_by(sensor) %>%
-    summarise(
-      total_spectra = n(),
-      saturated_spectra = sum(is_saturated),
-      saturation_rate = round(saturated_spectra / total_spectra * 100, 2),
-      max_intensity_overall = max(max_intensity, na.rm = TRUE),
-      mean_max_intensity = round(mean(max_intensity, na.rm = TRUE), 0),
-      .groups = "drop"
-    )
-  
-  cat("Saturation Summary by Sensor:\n")
-  print(saturation_summary)
-  total_saturated <- sum(corrected_data$is_saturated)
-  total_spectra <- nrow(corrected_data)
-  overall_rate <- round(total_saturated / total_spectra * 100, 2)
-  
-  cat(
-    sprintf(
-      "\nOverall: %d/%d spectra saturated (%.2f%%)\n",
-      total_saturated,
-      total_spectra,
-      overall_rate
-    )
-  )
-  
-  if (method == "remove") {
-    cat("\nRemoving saturated spectra...\n")
-    clean_data <- corrected_data %>% filter(!is_saturated)
-    cat(
-      sprintf(
-        "Removed %d saturated spectra. %d spectra remaining.\n",
-        total_saturated,
-        nrow(clean_data)
+sensor_summary %>%
+  mutate(sensor_num = as.numeric(str_extract(sensor, "\\d+"))) %>%
+  group_by(sensor) %>%
+  arrange(tube_number) %>%
+  mutate(
+    tube_position = row_number(),
+    max_tubes = max(tube_position)
+  ) %>%
+  ungroup() %>%
+  ggplot(
+    aes(
+      x = tube_position, 
+      y = reorder(sensor, -sensor_num), 
+      fill = observations
+      )
+    ) +
+  geom_tile(color = "white", size = 0.3) +
+  scale_fill_gradient2(
+    low = "lightblue", mid = "yellow", high = "red",
+    midpoint = median(sensor_summary$observations),
+    name = "Observations"
+  ) +
+  labs(
+    title = "Observations Heatmap: All Sensors",
+    subtitle = "X-axis shows tube position (1st, 2nd, 3rd, etc.) within each sensor",
+    x = "Tube Position (ordered within sensor)",
+    y = ""
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    panel.grid = element_blank(),
+    axis.text.x = element_text(size = 8)
+  ) +
+  scale_x_continuous(
+    breaks = seq(
+      1, 
+      max(
+        sensor_summary %>% 
+          group_by(sensor) %>% 
+          summarise(n = n()) %>% 
+          pull(n)
+        ), 
+      by = 5
       )
     )
-    
-  } else if (method == "cap") {
-    cat(sprintf(
-      "\nCapping intensities at threshold: %d\n",
-      saturation_threshold
-    ))
-    clean_data <- corrected_data %>%
-      rowwise() %>%
-      mutate(spec_array = list(pmin(spec_array, saturation_threshold))) %>%
-      ungroup()
-    
-  } else if (method == "interpolate") {
-    cat("\nInterpolating saturated regions...\n")
-    clean_data <- corrected_data %>%
-      rowwise() %>%
-      mutate(spec_array = list(
-        interpolate_saturated_points(spec_array, saturation_threshold)
-      )) %>%
-      ungroup()
-    
-  } else {
-    cat("\nFlagging saturated spectra (no removal/modification)\n")
-    clean_data <- corrected_data
-  }
-  
-  return(
-    list(
-      data = clean_data,
-      saturation_summary = saturation_summary,
-      total_saturated = total_saturated,
-      saturation_rate = overall_rate
-    )
+```
+
+<img src="man/figures/README-unnamed-chunk-17-1.png" width="100%" style="display: block; margin: auto;" />
+
+## Measurement timeline
+
+``` r
+temporal_summary <- nir_data$corrected_spectra %>%
+  mutate(datetime = as.POSIXct(datetime)) %>%
+  group_by(sensor) %>%
+  filter(spec_type == "SAMPLE") %>%
+  drop_na() %>%
+  summarise(
+    min_time = min(datetime, na.rm = TRUE),
+    max_time = max(datetime, na.rm = TRUE),
+    time_span_hours = as.numeric(difftime(
+      max(datetime, na.rm = TRUE),
+      min(datetime, na.rm = TRUE),
+      units = "hours"
+    )),
+    .groups = "drop"
+  ) %>%
+  print()
+#> # A tibble: 12 × 4
+#>    sensor    min_time            max_time            time_span_hours
+#>    <chr>     <dttm>              <dttm>                        <dbl>
+#>  1 sensor_1  2025-06-30 22:43:44 2025-07-03 16:53:58            66.2
+#>  2 sensor_10 2025-06-30 22:49:27 2025-07-03 16:51:47            66.0
+#>  3 sensor_11 2025-06-30 22:49:40 2025-07-03 16:44:34            65.9
+#>  4 sensor_12 2025-06-30 22:50:23 2025-07-03 16:54:47            66.1
+#>  5 sensor_2  2025-06-30 22:43:59 2025-07-03 16:53:36            66.2
+#>  6 sensor_3  2025-06-30 22:44:42 2025-07-03 16:54:13            66.2
+#>  7 sensor_4  2025-06-30 22:43:03 2025-07-03 16:52:45            66.2
+#>  8 sensor_5  2025-06-30 22:55:09 2025-07-03 16:54:32            66.0
+#>  9 sensor_6  2025-06-30 22:45:30 2025-07-03 16:54:34            66.2
+#> 10 sensor_7  2025-06-30 22:50:03 2025-07-03 16:52:47            66.0
+#> 11 sensor_8  2025-06-30 22:48:41 2025-07-03 16:43:32            65.9
+#> 12 sensor_9  2025-06-30 22:49:05 2025-07-03 16:51:47            66.0
+```
+
+``` r
+nir_data$corrected_spectra %>%
+  mutate(datetime = as.POSIXct(datetime)) %>%
+  filter(!is.na(datetime)) %>%
+  filter(spec_type == "SAMPLE") %>%
+  drop_na() %>%
+  ggplot(aes(x = datetime, y = sensor, color = sensor)) +
+  geom_point(
+    alpha = 0.6,
+    size = 0.5,
+    position = position_jitter(height = 0.2, width = 0)
+  ) +
+  ggsci::scale_color_ucscgb() +
+  labs(
+    title = "Measurement Timeline Across All Sensors",
+    subtitle = sprintf(
+      "Total measurements: %d | Date range: %s to %s",
+      nrow(nir_data$corrected_spectra %>% filter(spec_type == "SAMPLE")),
+      format(min(temporal_summary$min_time), "%Y-%m-%d"),
+      format(max(temporal_summary$max_time), "%Y-%m-%d")
+    ),
+    x = "Date/Time",
+    y = "",
+    caption = "Each point represents one spectral measurement"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "gray40")
   )
-}
+```
+
+<img src="man/figures/README-unnamed-chunk-19-1.png" width="100%" style="display: block; margin: auto;" />
+
+## Spectra
+
+``` r
+source(paste0(functions_path, "visualize_nirs_time_series.R"))
 ```
 
 ``` r
-interpolate_saturated_points <- function(spec_array, threshold) {
-  if (is.null(spec_array) ||
-      length(spec_array) == 0)
-    return(spec_array)
-  
-  saturated_idx <- which(spec_array >= threshold)
-  if (length(saturated_idx) == 0)
-    return(spec_array)
-  spec_interpolated <- spec_array
-  saturated_groups <- split(saturated_idx, cumsum(c(1, diff(saturated_idx) != 1)))
-  
-  for (group in saturated_groups) {
-    start_idx <- max(1, min(group) - 1)
-    end_idx <- min(length(spec_array), max(group) + 1)
-    
-    if (start_idx < min(group) && end_idx > max(group)) {
-      x_vals <- c(start_idx, end_idx)
-      y_vals <- c(spec_array[start_idx], spec_array[end_idx])
-      for (idx in group) {
-        spec_interpolated[idx] <- approx(x_vals, y_vals, idx)$y
-      }
-    }
-  }
-  return(spec_interpolated)
-}
-```
-
-``` r
-visualize_saturation_patterns <- function(saturation_results,
-                                          sensor_focus = "sensor_1",
-                                          threshold = 60000) {
-  p1 <- saturation_results$saturation_summary %>%
-    ggplot(aes(x = sensor, y = saturation_rate, fill = saturation_rate)) +
-    geom_col() +
-    scale_fill_viridis_c(name = "Saturation\nRate (%)") +
-    labs(
-      title = "Saturation Rate by Sensor",
-      x = "Sensor",
-      y = "Saturation Rate (%)",
-      caption = paste("Threshold:", threshold, "counts")
-    ) +
-    theme_minimal() +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1))
-  
-  print(p1)
-  
-  p2 <- saturation_results$data %>%
-    ggplot(aes(x = max_intensity, fill = is_saturated)) +
-    geom_histogram(bins = 50, alpha = 0.7) +
-    geom_vline(
-      xintercept = threshold,
-      color = "red",
-      linetype = "dashed",
-      size = 1
-    ) +
-    scale_fill_manual(values = c("FALSE" = "steelblue", "TRUE" = "red"),
-                      name = "Saturated") +
-    labs(
-      title = "Distribution of Maximum Intensities",
-      x = "Maximum Intensity",
-      y = "Count",
-      caption = "Red line shows saturation threshold"
-    ) +
-    theme_minimal()
-  
-  print(p2)
-  
-  sensor_data <- saturation_results$data %>%
-    filter(sensor == sensor_focus) %>%
-    mutate(datetime = as.POSIXct(datetime))
-  
-  if (nrow(sensor_data) > 0) {
-    p3 <- sensor_data %>%
-      ggplot(aes(x = datetime, y = max_intensity, color = is_saturated)) +
-      geom_point(alpha = 0.7) +
-      geom_hline(yintercept = threshold,
-                 color = "red",
-                 linetype = "dashed") +
-      scale_color_manual(values = c("FALSE" = "steelblue", "TRUE" = "red"),
-                         name = "Saturated") +
-      labs(
-        title = paste("Saturation Over Time -", sensor_focus),
-        x = "Date/Time",
-        y = "Maximum Intensity",
-        caption = "Red line shows saturation threshold"
-      ) +
-      theme_minimal()
-    
-    print(p3)
-  }
-  
-  return(
-    list(
-      saturation_by_sensor = p1,
-      intensity_distribution = p2,
-      time_series = if (exists("p3"))
-        p3
-      else
-        NULL
-    )
-  )
-}
-```
-
-``` r
-compare_saturation_handling <- function(nir_data,
-                                        method = "interpolate",
-                                        saturation_threshold = 60000,
-                                        tube_example = NULL,
-                                        sensor_example = "sensor_1") {
-  results <- detect_and_handle_saturation(nir_data, saturation_threshold, method = method)
-  if (is.null(tube_example)) {
-    saturated_tubes <- results$data %>%
-      filter(sensor == sensor_example, is_saturated == TRUE) %>%
-      slice_head(n = 1)
-    
-    if (nrow(saturated_tubes) > 0) {
-      tube_example <- saturated_tubes$tube_number[1]
-    } else {
-      tube_example <- results$data %>%
-        filter(sensor == sensor_example) %>%
-        slice_head(n = 1) %>%
-        pull(tube_number)
-    }
-  }
-  original_tube <- nir_data$corrected_spectra %>%
-    filter(sensor == sensor_example, tube_number == tube_example) %>%
-    slice_head(n = 1)
-  
-  processed_tube <- results$data %>%
-    filter(sensor == sensor_example, tube_number == tube_example) %>%
-    slice_head(n = 1)
-  
-  if (nrow(original_tube) > 0 && nrow(processed_tube) > 0) {
-    comparison_data <- data.frame(
-      wavelength_index = rep(1:length(original_tube$spec_array[[1]]), 2),
-      intensity = c(original_tube$spec_array[[1]], processed_tube$spec_array[[1]]),
-      type = rep(c("Original", paste("After", method)), each = length(original_tube$spec_array[[1]]))
-    )
-    
-    p_compare <- comparison_data %>%
-      ggplot(aes(x = wavelength_index, y = intensity, color = type)) +
-      geom_line(size = 0.8) +
-      geom_hline(
-        yintercept = saturation_threshold,
-        linetype = "dashed",
-        color = "red",
-        alpha = 0.7
-      ) +
-      scale_color_manual(values = c("Original" = "red", paste("After", method), "blue")) +
-      labs(
-        title = paste("Saturation Handling Comparison -", method),
-        subtitle = paste("Tube", tube_example, "from", sensor_example),
-        x = "Wavelength Index",
-        y = "Corrected Intensity",
-        color = "Processing",
-        caption = "Red dashed line shows saturation threshold"
-      ) +
-      theme_minimal()
-    
-    print(p_compare)
-  }
-  return(results)
-}
-```
-
-#### Detect and flag saturated spectra
-
-``` r
-saturation_results <- detect_and_handle_saturation(
-  nir_data, 
-  saturation_threshold = 60000, 
-  saturation_percentage = 0.05, 
-  method = "flag"
-  )
-#> === Saturation Detection and Handling ===
-#> Saturation Summary by Sensor:
-#> # A tibble: 12 × 6
-#>    sensor  total_spectra saturated_spectra saturation_rate max_intensity_overall
-#>    <chr>           <int>             <int>           <dbl>                 <int>
-#>  1 sensor…         25124             18364            73.1                 65535
-#>  2 sensor…         26353             20463            77.6                 65535
-#>  3 sensor…         26306             22459            85.4                 65535
-#>  4 sensor…         26820             19720            73.5                 65535
-#>  5 sensor…         23778             18134            76.3                 65535
-#>  6 sensor…         25791             22510            87.3                 65535
-#>  7 sensor…         25719             11476            44.6                 65535
-#>  8 sensor…         26679             23046            86.4                 65535
-#>  9 sensor…         26038             21541            82.7                 65535
-#> 10 sensor…         25764             19896            77.2                 65535
-#> 11 sensor…         25651             20846            81.3                 65535
-#> 12 sensor…         25119             17544            69.8                 65535
-#> # ℹ 1 more variable: mean_max_intensity <dbl>
+visualize_nirs_time_series(nir_data, "sensor_1", min_measurements = 2, seed = 100)
 #> 
-#> Overall: 235999/309142 spectra saturated (76.34%)
+#> === Time Series Analysis for sensor_1 ===
+#> Total measurements: 13556 
+#> Samples with 2 or more measurements: 88 
 #> 
-#> Flagging saturated spectra (no removal/modification)
-```
-
-#### Visualize saturation patterns
-
-``` r
-cat("\nCreating saturation visualization plots...\n")
+#> Plotting time series for tubes: 1021, 865, 337, 49, 553, 625 
 #> 
-#> Creating saturation visualization plots...
-saturation_plots <- visualize_saturation_patterns(saturation_results, "sensor_1", threshold = 60000)
-```
-
-<img src="man/figures/README-unnamed-chunk-22-1.png" width="100%" style="display: block; margin: auto;" /><img src="man/figures/README-unnamed-chunk-22-2.png" width="100%" style="display: block; margin: auto;" /><img src="man/figures/README-unnamed-chunk-22-3.png" width="100%" style="display: block; margin: auto;" />
-
-#### Interpolation method
-
-``` r
-# interpolated_results <- compare_saturation_handling(nir_data, method = "interpolate")
-```
-
-#### Removal and capping methods
-
-``` r
-removal_results <- compare_saturation_handling(nir_data, method = "remove")
-#> === Saturation Detection and Handling ===
-#> Saturation Summary by Sensor:
-#> # A tibble: 12 × 6
-#>    sensor  total_spectra saturated_spectra saturation_rate max_intensity_overall
-#>    <chr>           <int>             <int>           <dbl>                 <int>
-#>  1 sensor…         25124             18364            73.1                 65535
-#>  2 sensor…         26353             20463            77.6                 65535
-#>  3 sensor…         26306             22459            85.4                 65535
-#>  4 sensor…         26820             19720            73.5                 65535
-#>  5 sensor…         23778             18134            76.3                 65535
-#>  6 sensor…         25791             22510            87.3                 65535
-#>  7 sensor…         25719             11476            44.6                 65535
-#>  8 sensor…         26679             23046            86.4                 65535
-#>  9 sensor…         26038             21541            82.7                 65535
-#> 10 sensor…         25764             19896            77.2                 65535
-#> 11 sensor…         25651             20846            81.3                 65535
-#> 12 sensor…         25119             17544            69.8                 65535
-#> # ℹ 1 more variable: mean_max_intensity <dbl>
+#> Selected tube statistics:
+#>   Tube 553: 265 measurements over 0.2 hours
+#>   Tube 337: 198 measurements over 0.1 hours
+#>   Tube 625: 131 measurements over 0.1 hours
+#>   Tube 49: 95 measurements over 0.2 hours
+#>   Tube 1021: 87 measurements over 0.1 hours
+#>   Tube 865: 86 measurements over 0.1 hours
 #> 
-#> Overall: 235999/309142 spectra saturated (76.34%)
-#> 
-#> Removing saturated spectra...
-#> Removed 235999 saturated spectra. 73143 spectra remaining.
+#> Prepared 862 spectra with 256 wavelength points each
 ```
 
-<img src="man/figures/README-unnamed-chunk-24-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-21-1.png" width="100%" style="display: block; margin: auto;" />
+
+# Exploratory Data Analysis
+
+## Descriptive statistics for milk quality target variables
 
 ``` r
-capped_results <- compare_saturation_handling(nir_data, method = "cap")
-#> === Saturation Detection and Handling ===
-#> Saturation Summary by Sensor:
-#> # A tibble: 12 × 6
-#>    sensor  total_spectra saturated_spectra saturation_rate max_intensity_overall
-#>    <chr>           <int>             <int>           <dbl>                 <int>
-#>  1 sensor…         25124             18364            73.1                 65535
-#>  2 sensor…         26353             20463            77.6                 65535
-#>  3 sensor…         26306             22459            85.4                 65535
-#>  4 sensor…         26820             19720            73.5                 65535
-#>  5 sensor…         23778             18134            76.3                 65535
-#>  6 sensor…         25791             22510            87.3                 65535
-#>  7 sensor…         25719             11476            44.6                 65535
-#>  8 sensor…         26679             23046            86.4                 65535
-#>  9 sensor…         26038             21541            82.7                 65535
-#> 10 sensor…         25764             19896            77.2                 65535
-#> 11 sensor…         25651             20846            81.3                 65535
-#> 12 sensor…         25119             17544            69.8                 65535
-#> # ℹ 1 more variable: mean_max_intensity <dbl>
-#> 
-#> Overall: 235999/309142 spectra saturated (76.34%)
-#> 
-#> Capping intensities at threshold: 60000
-```
-
-<img src="man/figures/README-unnamed-chunk-25-1.png" width="100%" style="display: block; margin: auto;" />
-
-## Exploratory Data Analysis
-
-### Descriptive statistics for milk quality target variables
-
-``` r
-calculate_target_statistics <- function(nir_data) {
-  cat("=== Descriptive Statistics for Milk Quality Targets ===\n\n")
-  targets_data <- nir_data$lab_results %>%
-    select(
-      fat_percent, protein_percent, scc_thous_per_ml, lactose_percent,
-      barnname, lact, grp, dim_days, daily_milking, milk_wt_lbs) %>%
-    filter(
-      !is.na(fat_percent), 
-      !is.na(protein_percent), 
-      !is.na(scc_thous_per_ml),
-      !is.na(lactose_percent)
-      )
-  
-  cat("Total samples with complete target data:", nrow(targets_data), "\n\n")
-  target_vars <- c("fat_percent", "protein_percent", "scc_thous_per_ml", "lactose_percent")
-  
-  summary_stats <- targets_data %>%
-    select(all_of(target_vars)) %>%
-    summarise(
-      across(everything(), list(
-        n = ~ sum(!is.na(.x)),
-        mean = ~ mean(.x, na.rm = TRUE),
-        median = ~ median(.x, na.rm = TRUE),
-        sd = ~ sd(.x, na.rm = TRUE),
-        min = ~ min(.x, na.rm = TRUE),
-        max = ~ max(.x, na.rm = TRUE),
-        q25 = ~ quantile(.x, 0.25, na.rm = TRUE),
-        q75 = ~ quantile(.x, 0.75, na.rm = TRUE),
-        iqr = ~ IQR(.x, na.rm = TRUE),
-        cv = ~ sd(.x, na.rm = TRUE) / mean(.x, na.rm = TRUE) * 100,
-        skewness = ~ moments::skewness(.x, na.rm = TRUE),
-        kurtosis = ~ moments::kurtosis(.x, na.rm = TRUE)
-      ), .names = "{.col}_{.fn}")
-    ) %>%
-    pivot_longer(everything(), names_to = "stat", values_to = "value") %>%
-    separate(stat, into = c("variable", "statistic"), sep = "_(?=[^_]*$)") %>%
-    pivot_wider(names_from = statistic, values_from = value) %>%
-    select(variable, n, mean, median, sd, cv, min, q25, q75, max, iqr, skewness, kurtosis)
-  
-  cat("Summary Statistics Table:\n")
-  print(kable(summary_stats, digits = 3, format = "markdown"))
-  cat("\n")
-  
-  return(list(
-    summary_stats = summary_stats,
-    targets_data = targets_data
-  ))
-}
-```
-
-``` r
-create_distribution_plots <- function(targets_data) {
-  cat("Creating distribution plots...\n")
-  target_vars <- c("fat_percent", "protein_percent", "scc_thous_per_ml", "lactose_percent")
-  hist_plots <- map(target_vars, ~ {
-    targets_data %>%
-      ggplot(aes(x = !!sym(.x))) +
-      geom_histogram(aes(y = ..density..), bins = 30, alpha = 0.7, fill = "steelblue", color = "white") +
-      geom_density(color = "red", size = 1, alpha = 0.7) +
-      labs(
-        title = paste("Distribution of", str_replace(.x, "_", " ") %>% str_to_title()),
-        x = str_replace(.x, "_", " ") %>% str_to_title(),
-        y = "Density"
-      ) +
-      theme_minimal() +
-      theme(plot.title = element_text(size = 12, face = "bold"))
-  })
-  names(hist_plots) <- target_vars
-  combined_hist <- wrap_plots(hist_plots, ncol = 2)
-  print(combined_hist)
-  box_plots <- targets_data %>%
-    select(all_of(target_vars)) %>%
-    pivot_longer(everything(), names_to = "variable", values_to = "value") %>%
-    mutate(variable = str_replace(variable, "_", " ") %>% str_to_title()) %>%
-    ggplot(aes(x = variable, y = value, fill = variable)) +
-    geom_boxplot(alpha = 0.7, outlier.alpha = 0.6) +
-    facet_wrap(~variable, scales = "free", ncol = 2) +
-    labs(
-      title = "Box Plots of Target Variables",
-      x = "Variable",
-      y = "Value"
-    ) +
-    theme_minimal() +
-    theme(
-      axis.text.x = element_blank(),
-      legend.position = "none",
-      strip.text = element_text(face = "bold")
-    )
-  print(box_plots)
-  return(list(histograms = hist_plots, boxplots = box_plots))
-}
-```
-
-``` r
-analyze_correlations <- function(targets_data) {
-  cat("Analyzing correlations between target variables...\n")
-  target_vars <- c("fat_percent", "protein_percent", "scc_thous_per_ml", "lactose_percent")
-  cor_matrix <- targets_data %>%
-    select(all_of(target_vars)) %>%
-    cor(use = "complete.obs")
-  
-  cat("Correlation Matrix:\n")
-  print(round(cor_matrix, 3))
-  cat("\n")
-  
-  corrplot(
-    cor_matrix, 
-    method = "color", 
-    type = "upper", 
-    order = "hclust",
-    tl.cex = 0.8, 
-    tl.col = "black",
-    addCoef.col = "black",
-    number.cex = 0.8,
-    title = "Correlation Matrix of Target Variables",
-    mar = c(0,0,2,0)
-    )
-  
-  pairs_plot <- targets_data %>%
-    select(all_of(target_vars)) %>%
-    ggpairs(
-      columnLabels = c("Fat %", "Protein %", "SCC (1000/ml)", "Lactose %"),
-      title = "Pairwise Relationships Between Target Variables"
-    ) +
-    theme_minimal()
-  
-  print(pairs_plot)
-  return(cor_matrix)
-}
-```
-
-``` r
-analyze_by_groups <- function(targets_data) {
-  cat("Analyzing target variables by categorical groups...\n")
-  target_vars <- c("fat_percent", "protein_percent", "scc_thous_per_ml", "lactose_percent")
-  by_lactation <- targets_data %>%
-    group_by(lact) %>%
-    summarise(
-      n = n(),
-      across(all_of(target_vars), list(
-        mean = ~ mean(.x, na.rm = TRUE),
-        sd = ~ sd(.x, na.rm = TRUE)
-      ), .names = "{.col}_{.fn}"),
-      .groups = "drop"
-    )
-  
-  cat("Summary by Lactation Number:\n")
-  print(kable(by_lactation, digits = 3, format = "markdown"))
-  cat("\n")
-  
-  by_group <- targets_data %>%
-    group_by(grp) %>%
-    summarise(
-      n = n(),
-      across(all_of(target_vars), list(
-        mean = ~ mean(.x, na.rm = TRUE),
-        sd = ~ sd(.x, na.rm = TRUE)
-      ), .names = "{.col}_{.fn}"),
-      .groups = "drop"
-    )
-  
-  cat("Summary by Group:\n")
-  print(kable(by_group, digits = 3, format = "markdown"))
-  cat("\n")
-  
-  violin_lact <- targets_data %>%
-    select(lact, all_of(target_vars)) %>%
-    pivot_longer(cols = all_of(target_vars), names_to = "variable", values_to = "value") %>%
-    mutate(
-      variable = str_replace(variable, "_", " ") %>% str_to_title(),
-      lact = factor(lact)
-    ) %>%
-    ggplot(aes(x = lact, y = value, fill = lact)) +
-    geom_violin(alpha = 0.7) +
-    geom_boxplot(width = 0.2, alpha = 0.8) +
-    facet_wrap(~variable, scales = "free_y", ncol = 2) +
-    labs(
-      title = "Distribution of Target Variables by Lactation Number",
-      x = "Lactation Number",
-      y = "Value",
-      fill = "Lactation"
-    ) +
-    theme_minimal() +
-    theme(strip.text = element_text(face = "bold"))
-  
-  print(violin_lact)
-  
-  violin_group <- targets_data %>%
-    select(grp, all_of(target_vars)) %>%
-    pivot_longer(cols = all_of(target_vars), names_to = "variable", values_to = "value") %>%
-    mutate(variable = str_replace(variable, "_", " ") %>% str_to_title()) %>%
-    ggplot(aes(x = grp, y = value, fill = grp)) +
-    geom_violin(alpha = 0.7) +
-    geom_boxplot(width = 0.2, alpha = 0.8) +
-    facet_wrap(~variable, scales = "free_y", ncol = 2) +
-    labs(
-      title = "Distribution of Target Variables by Group",
-      x = "Group",
-      y = "Value",
-      fill = "Group"
-    ) +
-    theme_minimal() +
-    theme(strip.text = element_text(face = "bold"))
-  
-  print(violin_group)
-  
-  return(list(
-    by_lactation = by_lactation,
-    by_group = by_group,
-    violin_lact = violin_lact,
-    violin_group = violin_group
-  ))
-}
-```
-
-``` r
-identify_outliers <- function(targets_data) {
-  cat("Identifying outliers in target variables...\n")
-  target_vars <- c("fat_percent", "protein_percent", "scc_thous_per_ml", "lactose_percent")
-  
-  outlier_summary <- map_dfr(target_vars, ~ {
-    var_data <- targets_data[[.x]]
-    q1 <- quantile(var_data, 0.25, na.rm = TRUE)
-    q3 <- quantile(var_data, 0.75, na.rm = TRUE)
-    iqr <- q3 - q1
-    lower_bound <- q1 - 1.5 * iqr
-    upper_bound <- q3 + 1.5 * iqr
-    
-    outliers <- which(var_data < lower_bound | var_data > upper_bound)
-    
-    tibble(
-      variable = .x,
-      n_outliers = length(outliers),
-      outlier_percentage = round(length(outliers) / length(var_data) * 100, 2),
-      lower_bound = round(lower_bound, 3),
-      upper_bound = round(upper_bound, 3),
-      min_outlier = ifelse(length(outliers) > 0, round(min(var_data[outliers]), 3), NA),
-      max_outlier = ifelse(length(outliers) > 0, round(max(var_data[outliers]), 3), NA)
-    )
-  })
-  
-  cat("Outlier Summary (using IQR method):\n")
-  print(kable(outlier_summary, format = "markdown"))
-  cat("\n")
-  return(outlier_summary)
-}
+source(paste0(functions_path, "calculate_target_statistics.R"))
+source(paste0(functions_path, "create_distribution_plots.R"))
+source(paste0(functions_path, "analyze_correlations.R"))
+source(paste0(functions_path, "analyze_by_groups.R"))
+source(paste0(functions_path, "identify_outliers.R"))
 ```
 
 ``` r
@@ -1172,7 +594,7 @@ descriptive_results <- run_descriptive_analysis(nir_data)
 #> Creating distribution plots...
 ```
 
-<img src="man/figures/README-unnamed-chunk-32-1.png" width="100%" style="display: block; margin: auto;" /><img src="man/figures/README-unnamed-chunk-32-2.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-24-1.png" width="100%" style="display: block; margin: auto;" /><img src="man/figures/README-unnamed-chunk-24-2.png" width="100%" style="display: block; margin: auto;" />
 
     #> Analyzing correlations between target variables...
     #> Correlation Matrix:
@@ -1182,7 +604,7 @@ descriptive_results <- run_descriptive_analysis(nir_data)
     #> scc_thous_per_ml       0.104           0.131            1.000          -0.069
     #> lactose_percent        0.386           0.730           -0.069           1.000
 
-<img src="man/figures/README-unnamed-chunk-32-3.png" width="100%" style="display: block; margin: auto;" /><img src="man/figures/README-unnamed-chunk-32-4.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-24-3.png" width="100%" style="display: block; margin: auto;" /><img src="man/figures/README-unnamed-chunk-24-4.png" width="100%" style="display: block; margin: auto;" />
 
     #> Analyzing target variables by categorical groups...
     #> Summary by Lactation Number:
@@ -1206,7 +628,7 @@ descriptive_results <- run_descriptive_analysis(nir_data)
     #> |A1  | 600|            3.355|          0.819|                2.780|              0.354|               219.357|             474.232|                4.749|              0.471|
     #> |B2  | 480|            3.431|          0.849|                2.776|              0.395|               241.542|             778.383|                4.678|              0.574|
 
-<img src="man/figures/README-unnamed-chunk-32-5.png" width="100%" style="display: block; margin: auto;" /><img src="man/figures/README-unnamed-chunk-32-6.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-24-5.png" width="100%" style="display: block; margin: auto;" /><img src="man/figures/README-unnamed-chunk-24-6.png" width="100%" style="display: block; margin: auto;" />
 
     #> Identifying outliers in target variables...
     #> Outlier Summary (using IQR method):
@@ -1281,81 +703,75 @@ descriptive_results <- run_descriptive_analysis(nir_data)
     #> 3 protein_percent   13.4
     #> 4 lactose_percent   11.0
 
-### PCA analysis of milk quality targets
+## PCA analysis of milk quality targets
+
+A principal component analysis (PCA) was conducted on four key milk
+composition variables: fat percentage, protein percentage, somatic cell
+count (SCC) per milliliter (thousands), and lactose percentage. The
+analysis aimed to understand the underlying structure of relationships
+between these variables and assess potential multicollinearity for
+subsequent modeling efforts.
 
 ``` r
-prepare_pca_data <- function(nir_data) {
-  cat("=== Preparing Data for PCA Analysis ===\n")
-  pca_data <- nir_data$lab_results %>%
+pca_data <- nir_data$lab_results %>%
     select(
-      fat_percent, protein_percent, scc_thous_per_ml, lactose_percent,
-      dim_days, daily_milking, milk_wt_lbs,
-      lact, grp, tube_number
-    ) %>%
+      fat_percent, 
+      protein_percent, 
+      scc_thous_per_ml, 
+      lactose_percent,
+      dim_days, # days since the cow started producing milk
+      milk_wt_lbs, # weight of the milk in pounds
+      other_solids_percent, # other solids percentage in the milk
+      solids_not_fat_percent, # total solids that are not fat as a percentage
+      total_solids_percent, # total solids as a percentage in the milk
+      mun_mg_per_dl # total solids in milligrams per deciliter
+      ) %>%
     filter(
       !is.na(fat_percent), 
       !is.na(protein_percent), 
       !is.na(scc_thous_per_ml), 
       !is.na(lactose_percent)
-    ) %>%
-    mutate(
-      lact = factor(lact),
-      grp = factor(grp)
     )
-  cat("Dataset dimensions:", nrow(pca_data), "samples x", ncol(pca_data), "variables\n")
-  cat("Target variables: fat_percent, protein_percent, scc_thous_per_ml, lactose_percent\n")
-  cat("Additional quantitative variables: dim_days, daily_milking, milk_wt_lbs\n")
-  cat("Supplementary categorical variables: lact, grp\n\n")
-  return(pca_data)
-}
 ```
 
 ``` r
-run_pca_analysis <- function(pca_data, scale_data = TRUE) {
-  cat("=== Running PCA Analysis ===\n")
-  quanti_vars <- c(
+quanti_vars <- c(
     "fat_percent", "protein_percent", "scc_thous_per_ml", "lactose_percent",
-    "dim_days", "daily_milking", "milk_wt_lbs"
+    "other_solids_percent", "solids_not_fat_percent", "total_solids_percent",
+    "mun_mg_per_dl", "milk_wt_lbs", "dim_days"
     )
-  quali_vars <- c("lact", "grp")
-  quanti_indices <- which(names(pca_data) %in% quanti_vars)
-  quali_indices <- which(names(pca_data) %in% quali_vars)
-  pca_result <- PCA(
+```
+
+``` r
+quanti_indices <- which(names(pca_data) %in% quanti_vars)
+```
+
+``` r
+pca_result <- PCA(
     pca_data,
-    scale.unit = scale_data,
-    quanti.sup = if(length(setdiff(quanti_indices, 1:4)) > 0) setdiff(quanti_indices, 1:4) else NULL,
-    quali.sup = quali_indices,
+    scale.unit = TRUE,
+    quanti.sup = if(length(setdiff(quanti_indices, 1:10)) > 0) {
+      setdiff(quanti_indices, 1:10)
+    } else NULL,
     graph = FALSE
   )
-  cat("PCA completed successfully!\n")
-  cat("Number of components:", ncol(pca_result$var$coord), "\n")
-  cat("Scaling applied:", scale_data, "\n\n")
-  return(pca_result)
-}
 ```
 
 ``` r
-analyze_eigenvalues <- function(pca_result) {
-  cat("=== Eigenvalue Analysis ===\n")
-  eigenvalues <- get_eigenvalue(pca_result)
-  print(round(eigenvalues, 3))
-  cat("\n")
-  
-  scree_plot <- fviz_eig(
+scree_plot <- fviz_eig(
     pca_result, 
     addlabels = TRUE, 
-    ylim = c(0, 50),
-    title = "Scree Plot - Variance Explained by Each Component",
+    ylim = c(0, 60),
+    title = "Scree Plot",
     xlab = "Principal Components",
     ylab = "Percentage of Variance Explained"
     ) +
-    theme_minimal() +
+    theme_light() +
     geom_hline(yintercept = 10, linetype = "dashed", color = "red", alpha = 0.7) +
     labs(caption = "Red line indicates 10% variance threshold")
-  
-  print(scree_plot)
-  
-  cum_var_plot <- as.data.frame(eigenvalues) %>%
+
+eigenvalues <- get_eigenvalue(pca_result)
+cum_var_plot <- as.data.frame(eigenvalues) %>%
     mutate(component = 1:nrow(.)) %>%
     ggplot(aes(x = component, y = cumulative.variance.percent)) +
     geom_line(size = 1.2, color = "steelblue") +
@@ -1368,492 +784,348 @@ analyze_eigenvalues <- function(pca_result) {
       y = "Cumulative Variance (%)",
       caption = "Red line indicates 80% variance threshold"
     ) +
-    theme_minimal()
-  
-  print(cum_var_plot)
-  return(eigenvalues)
-}
+    theme_light()
 ```
 
 ``` r
-analyze_variable_contributions <- function(pca_result) {
-  cat("=== Variable Contributions Analysis ===\n")
-  var_contrib <- get_pca_var(pca_result)
-  
-  cat("Variable coordinates on PC1 and PC2:\n")
-  print(round(var_contrib$coord[, 1:2], 3))
-  cat("\n")
-  
-  cat("Variable contributions to PC1 and PC2 (%):\n")
-  print(round(var_contrib$contrib[, 1:2], 2))
-  cat("\n")
-  
-  cat("Cos2 (quality of representation) for PC1 and PC2:\n")
-  print(round(var_contrib$cos2[, 1:2], 3))
-  cat("\n")
-  
-  contrib_pc1 <- fviz_contrib(
-    pca_result, 
-    choice = "var", 
-    axes = 1, 
-    top = 10,
-    title = "Variable Contributions to PC1",
-    fill = "steelblue", 
-    color = "steelblue"
+scree_plot | cum_var_plot
+```
+
+<img src="man/figures/README-unnamed-chunk-30-1.png" width="100%" style="display: block; margin: auto;" />
+
+The PCA extracted two principal components that collectively explained
+67.6% of the total variance in the dataset. The first principal
+component accounted for 51.1% of the variance, while the second
+component explained an additional 16.5%.
+
+``` r
+contrib_pc1 <- fviz_contrib(
+  pca_result,
+  choice = "var",
+  axes = 1,
+  top = 10,
+  title = "Dim1",
+  fill = "steelblue",
+  color = "steelblue"
+  ) +
+  labs(x = "") +
+  theme_light() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+contrib_pc2 <- fviz_contrib(
+  pca_result,
+  choice = "var",
+  axes = 2,
+  top = 10,
+  title = "Dim2",
+  fill = "coral",
+  color = "coral"
+  ) +
+  labs(x = "") +
+  theme_light() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+contrib_combined <- fviz_contrib(
+  pca_result,
+  choice = "var",
+  axes = 1:2,
+  title = "Dim1 and Dim2",
+  fill = "darkgreen",
+  color = "darkgreen"
+  ) +
+  labs(x = "") +
+  theme_light() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+``` r
+contrib_pc1 | contrib_pc2 | contrib_combined
+```
+
+<img src="man/figures/README-unnamed-chunk-32-1.png" width="100%" style="display: block; margin: auto;" />
+
+Dim1 represents a milk composition axis, with relatively balanced
+contributions from multiple composition variables. The contribution
+analysis reveals that fat percentage (18%), protein percentage (17%),
+other solids percentage (16%), lactose percentage (15%), and total
+solids percentage (15%) all contribute substantially and approximately
+equally to this component. Somatic cell count contributes minimally
+(\<2%) to Dim1, indicating it varies independently from the primary milk
+composition gradient.
+
+Dim2 is primarily driven by milk production quantity, with milk weight
+(mlk_wt_lbs) contributing 35% of the variance in this component. This
+represents a milk yield dimension that captures variation in production
+volume. Other variables show much lower contributions to Dim2, with fat
+percentage contributing approximately 12% and SCC contributing
+approximately 10-12%.
+
+``` r
+p1 <- fviz_pca_var(
+  pca_result,
+  col.var = "cos2",
+  gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+  col.circle = "white",
+  repel = TRUE,
+  title = "Quality Assessment of Variable Projections",
+  legend.title = "Cos2"
+  ) +
+  theme_light() +
+  theme(panel.grid = element_blank())
+```
+
+``` r
+p2 <- fviz_pca_var(
+  pca_result,
+  col.var = "contrib",
+  gradient.cols = c("darkblue", "green", "darkred"),
+  repel = TRUE,
+  title = "Correlation Circle of Variable Relationships",
+  legend.title = "Contribution"
+  ) +
+  annotate(
+    "circle",
+    x = 0, y = 0,
+    color = "grey70",
+    linetype = "solid",
+    linewidth = 0.1
+  ) +
+  xlim(-1.01, 1.01) + 
+  ylim(-1.01, 1.01) +
+  theme_light() +
+  theme(panel.grid = element_blank())
+```
+
+``` r
+p1 | p2
+```
+
+<img src="man/figures/README-unnamed-chunk-35-1.png" width="100%" style="display: block; margin: auto;" />
+
+The correlation circle and contribution analysis reveal a
+three-dimensional structure in the dataset:
+
+- **Composition Quality Dimension (Dim1):** All major milk composition
+  variables (fat, protein, lactose, other solids, total solids) cluster
+  together with similar contribution patterns, indicating strong
+  positive correlations and suggesting they represent facets of overall
+  milk nutritional quality.
+- **Production Quantity Dimension (Dim2):** Milk weight operates as the
+  primary driver of the second dimension, representing production
+  volume.
+- **Health-Production Trade-off Dimension (Dim2):** The negative
+  correlation between milk weight and somatic cell count along Dim2-axis
+  reveals that higher milk production is associated with lower SCC,
+  while lower production coincides with higher SCC (potentially
+  indicating health issues affecting yield).
+
+``` r
+pca_mod <- modeling_data %>%
+  select(starts_with("X")) %>%
+  PCA(scale.unit = FALSE, graph = FALSE)
+```
+
+``` r
+pca_scores <- pca_mod %>%
+  pluck("ind", "coord") %>%
+  as_tibble() %>%
+  bind_cols(modeling_data %>% select(sensor, all_of(targets)), .) %>%
+  print()
+#> # A tibble: 77,986 × 10
+#>    sensor     fat protein   scc lactose   Dim.1   Dim.2   Dim.3   Dim.4   Dim.5
+#>    <fct>    <dbl>   <dbl> <dbl>   <dbl>   <dbl>   <dbl>   <dbl>   <dbl>   <dbl>
+#>  1 sensor_1   4.4     3.1     9     4.5   6270.  11757.  -7212. -12294.  -4469.
+#>  2 sensor_1   4.4     3.1     9     4.5  51826.  20914.  -1628.  -6135.  -2047.
+#>  3 sensor_1   4.4     3.1     9     4.5 -54743.   -569. -10624. -13590.  -8249.
+#>  4 sensor_1   4.4     3.1     9     4.5  32866. -21134. -10024.   2166. -14651.
+#>  5 sensor_1   4.4     3.1     9     4.5 -41911.   9382.  -7206. -14435.  -6035.
+#>  6 sensor_1   4.4     3.1     9     4.5  22100. -12000.  -9712.  -2660. -11956.
+#>  7 sensor_1   4.4     3.1     9     4.5  78763. -18191.  -3211.  12269. -13211.
+#>  8 sensor_1   4.4     3.1     9     4.5  -3897.  27223.  -4050. -15185.   4031.
+#>  9 sensor_1   4.4     3.1     9     4.5  93088.  -4785.   1604.  11211. -11006.
+#> 10 sensor_1   4.4     3.1     9     4.5  -1447.  -7378. -10859.  -8628. -11713.
+#> # ℹ 77,976 more rows
+```
+
+``` r
+ellipse1 <- pca_scores %>% select(starts_with("Dim")) %>% ellipseCoord(pcx = 1, pcy = 2)
+```
+
+``` r
+t1 <- round(as.numeric(pca_mod$eig[1,2]), 2)
+t2 <- round(as.numeric(pca_mod$eig[2,2]), 2)
+t3 <- round(as.numeric(pca_mod$eig[3,2]), 2)
+```
+
+``` r
+p1 <- ggplot() +
+  geom_polygon(data = ellipse1, aes(x, y), color = "black", fill = "white") +
+  geom_point(data = pca_scores, aes(x = Dim.1, y = Dim.2, fill = sensor), shape = 21, size = 3, color = "black") +
+  scale_fill_viridis_d(option = "viridis") +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black", linewidth = .2) +
+  geom_vline(xintercept = 0, linetype = "solid", color = "black", linewidth = .2) +
+  labs(x = glue::glue("Dim1 [{t1}%]"), y = glue::glue("Dim2 [{t2}%]")) +
+  theme_grey() +
+  theme(
+    legend.position = "none",
+    aspect.ratio = .7,
+    panel.grid = element_blank(),
+    panel.background = element_rect(
+    colour = "black",
+    linewidth = .3
+    )
+  )
+
+p2 <- ggplot() +
+  geom_polygon(data = ellipse1, aes(x, y), color = "black", fill = "white") +
+  geom_point(data = pca_scores, aes(x = Dim.1, y = Dim.3, fill = sensor), shape = 21, size = 3, color = "black") +
+  scale_fill_viridis_d(option = "viridis") +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black", linewidth = .2) +
+  geom_vline(xintercept = 0, linetype = "solid", color = "black", linewidth = .2) +
+  labs(
+    x = glue::glue("Dim1 [{t1}%]"), 
+    y = glue::glue("Dim3 [{t3}%]")
     ) +
-    theme_minimal() +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1))
-  
-  contrib_pc2 <- fviz_contrib(
-    pca_result, 
-    choice = "var", 
-    axes = 2, 
-    top = 10,
-    title = "Variable Contributions to PC2", 
-    fill = "coral", 
-    color = "coral"
+  theme_grey() +
+   theme(
+    aspect.ratio = .7,
+    panel.grid = element_blank(),
+    panel.background = element_rect(
+    colour = "black",
+    linewidth = .3
+    )
+  )
+```
+
+``` r
+wrap_plots(p1, p2, ncol = 1) + 
+  plot_layout(guides = "collect")
+```
+
+<img src="man/figures/README-unnamed-chunk-41-1.png" width="100%" style="display: block; margin: auto;" />
+
+The sensor differences are primarily captured by Dim3 (5.96% variance),
+while Dim1 and Dim2 (which together explain 71.38% + 14.13% = ~85.4% of
+the variation) show much more overlap between sensors. This means that
+the major sources of variation (Dim1 & Dim2) are likely driven by actual
+sample properties (milk composition differences), while the
+sensor-to-sensor differences are relegated to a minor component (Dim3).
+Consequently, models built on this data should be reasonably robust
+across sensors since the main variation is sample-driven.
+
+``` r
+pca_sensor1 <- modeling_data %>%
+  filter(sensor == "sensor_1") %>%
+  select(starts_with("X")) %>%
+  PCA(scale.unit = FALSE, graph = FALSE)
+```
+
+``` r
+scores_sensor1 <- pca_sensor1 %>%
+  pluck("ind", "coord") %>%
+  as_tibble() %>%
+  bind_cols(modeling_data %>% filter(sensor == "sensor_1") %>% select(sensor, all_of(targets)), .) %>%
+  print()
+#> # A tibble: 7,264 × 10
+#>    sensor     fat protein   scc lactose   Dim.1   Dim.2   Dim.3  Dim.4  Dim.5
+#>    <fct>    <dbl>   <dbl> <dbl>   <dbl>   <dbl>   <dbl>   <dbl>  <dbl>  <dbl>
+#>  1 sensor_1   4.4     3.1     9     4.5  24667.   8379.  12892.  6982.  1053.
+#>  2 sensor_1   4.4     3.1     9     4.5  67287.  28093.   6936.  5904.  1291.
+#>  3 sensor_1   4.4     3.1     9     4.5 -32718. -16132.  13892. -1733.  -905.
+#>  4 sensor_1   4.4     3.1     9     4.5  56691. -17872.  -7024.   692.   847.
+#>  5 sensor_1   4.4     3.1     9     4.5 -22103.  -3277.  15507.  -855. -1395.
+#>  6 sensor_1   4.4     3.1     9     4.5  44531. -11538.   -693.  2855.  -267.
+#>  7 sensor_1   4.4     3.1     9     4.5 100563.  -3015. -17317. -5616.  1177.
+#>  8 sensor_1   4.4     3.1     9     4.5  11716.  22983.  19481.  5757.  3926.
+#>  9 sensor_1   4.4     3.1     9     4.5 111928.  13658. -15223. -5585. -1717.
+#> 10 sensor_1   4.4     3.1     9     4.5  20715. -12641.   6376.  4632. -2400.
+#> # ℹ 7,254 more rows
+```
+
+``` r
+ellipse1 <- scores_sensor1 %>% select(starts_with("Dim")) %>% ellipseCoord(pcx = 1, pcy = 2)
+t1 <- round(as.numeric(pca_sensor1$eig[1,2]), 2)
+t2 <- round(as.numeric(pca_sensor1$eig[2,2]), 2)
+t3 <- round(as.numeric(pca_sensor1$eig[3,2]), 2)
+```
+
+``` r
+p1 <- ggplot() +
+  geom_polygon(data = ellipse1, aes(x, y), color = "black", fill = "white") +
+  geom_point(data = scores_sensor1, aes(x = Dim.1, y = Dim.2, fill = protein), shape = 21, size = 3, color = "black") +
+  scale_fill_viridis_c(option = "viridis") +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black", linewidth = .2) +
+  geom_vline(xintercept = 0, linetype = "solid", color = "black", linewidth = .2) +
+  labs(x = glue::glue("Dim1 [{t1}%]"), y = glue::glue("Dim2 [{t2}%]")) +
+  theme_grey() +
+  theme(
+    legend.position = "none",
+    aspect.ratio = .7,
+    panel.grid = element_blank(),
+    panel.background = element_rect(
+    colour = "black",
+    linewidth = .3
+    )
+  )
+
+p2 <- ggplot() +
+  geom_polygon(data = ellipse1, aes(x, y), color = "black", fill = "white") +
+  geom_point(data = scores_sensor1, aes(x = Dim.1, y = Dim.3, fill = protein), shape = 21, size = 3, color = "black") +
+  scale_fill_viridis_c(option = "viridis") +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black", linewidth = .2) +
+  geom_vline(xintercept = 0, linetype = "solid", color = "black", linewidth = .2) +
+  labs(
+    x = glue::glue("Dim1 [{t1}%]"), 
+    y = glue::glue("Dim3 [{t3}%]")
     ) +
-    theme_minimal() +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1))
-  
-  print(contrib_pc1)
-  print(contrib_pc2)
-  
-  contrib_combined <- fviz_contrib(
-    pca_result, 
-    choice = "var", 
-    axes = 1:2,
-    title = "Variable Contributions to PC1 and PC2",
-    fill = "darkgreen",
-    color = "darkgreen"
-    ) +
-    theme_minimal() +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1))
-  
-  print(contrib_combined)
-  return(var_contrib)
-}
+  theme_grey() +
+   theme(
+    aspect.ratio = .7,
+    panel.grid = element_blank(),
+    panel.background = element_rect(
+    colour = "black",
+    linewidth = .3
+    )
+  )
 ```
 
 ``` r
-create_pca_biplots <- function(pca_result, pca_data) {
-  cat("=== Creating PCA Biplots ===\n")
-  biplot_basic <- fviz_pca_biplot(
-    pca_result,
-    repel = TRUE,
-    col.var = "contrib",
-    gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
-    title = "PCA Biplot - Variables and Individuals",
-    legend.title = "Contribution"
-    ) +
-    theme_minimal()
-  
-  print(biplot_basic)
-  
-  biplot_lact <- fviz_pca_ind(
-    pca_result,
-    col.ind = pca_data$lact,
-    palette = "jco",
-    addEllipses = TRUE,
-    legend.title = "Lactation Number",
-    title = "PCA - Individuals Colored by Lactation Number",
-    repel = TRUE
-    ) +
-    theme_minimal()
-  
-  print(biplot_lact)
-  
-  biplot_group <- fviz_pca_ind(
-    pca_result,
-    col.ind = pca_data$grp,
-    palette = "Dark2",
-    addEllipses = TRUE,
-    legend.title = "Group",
-    title = "PCA - Individuals Colored by Group",
-    repel = TRUE
-    ) +
-    theme_minimal()
-  
-  print(biplot_group)
-  
-  var_plot <- fviz_pca_var(
-    pca_result,
-    col.var = "cos2",
-    gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
-    repel = TRUE,
-    title = "PCA - Variables Factor Map",
-    legend.title = "Cos2"
-    ) +
-    theme_minimal()
-  
-  print(var_plot)
-  
-  return(list(
-    biplot_basic = biplot_basic,
-    biplot_lact = biplot_lact,
-    biplot_group = biplot_group,
-    var_plot = var_plot
-  ))
-}
+wrap_plots(p1, p2, ncol = 1) + 
+  plot_layout(guides = "collect")
 ```
 
-``` r
-analyze_supplementary_variables <- function(pca_result) {
-  cat("=== Supplementary Variables Analysis ===\n")
-  if (!is.null(pca_result$quanti.sup)) {
-    cat("Supplementary Quantitative Variables Coordinates:\n")
-    print(round(pca_result$quanti.sup$coord[, 1:2], 3))
-    cat("\n")
-    sup_quanti_plot <- fviz_pca_var(
-      pca_result, choice = "quanti.sup",
-      col.var = "steelblue",
-      repel = TRUE,
-      title = "Supplementary Quantitative Variables"
-      ) +
-      theme_minimal()
-    print(sup_quanti_plot)
-  }
-  
-  if (!is.null(pca_result$quali.sup)) {
-    cat("Supplementary Qualitative Variables:\n")
-    cat("Coordinates of category centroids:\n")
-    print(round(pca_result$quali.sup$coord[, 1:2], 3))
-    cat("\n")
-    
-    cat("Cos2 of categories:\n")
-    print(round(pca_result$quali.sup$cos2[, 1:2], 3))
-    cat("\n")
-    sup_quali_plot <- fviz_pca_var(
-      pca_result, choice = "quali.sup",
-      col.var = "coral",
-      repel = TRUE,
-      title = "Supplementary Qualitative Variables"
-      ) +
-      theme_minimal()
-    print(sup_quali_plot)
-  }
-}
-```
+<img src="man/figures/README-unnamed-chunk-46-1.png" width="100%" style="display: block; margin: auto;" />
+
+# Modeling
+
+## Data splits and preprocessing
 
 ``` r
-interpret_pca_results <- function(pca_result, eigenvalues, var_contrib) {
-  cat("=== PCA Results Interpretation ===\n")
-  
-   if (is.matrix(eigenvalues)) {
-    eigenvalues <- as.data.frame(eigenvalues)
-  }
-  
-  cat("COMPONENT INTERPRETATION:\n")
-  cat("------------------------\n")
-  pc1_vars <- var_contrib$contrib[, 1]
-  pc1_top <- names(sort(pc1_vars, decreasing = TRUE))[1:3]
-  cat(sprintf("PC1 (%.1f%% variance):\n", eigenvalues$variance.percent[1]))
-  cat("- Main contributors:", paste(pc1_top, collapse = ", "), "\n")
-  cat("- Loadings (coordinates):\n")
-  for (var in pc1_top) {
-    cat(sprintf("  %s: %.3f\n", var, var_contrib$coord[var, 1]))
-  }
-  cat("\n")
-  pc2_vars <- var_contrib$contrib[, 2]
-  pc2_top <- names(sort(pc2_vars, decreasing = TRUE))[1:3]
-  cat(sprintf("PC2 (%.1f%% variance):\n", eigenvalues$variance.percent[2]))
-  cat("- Main contributors:", paste(pc2_top, collapse = ", "), "\n")
-  cat("- Loadings (coordinates):\n")
-  for (var in pc2_top) {
-    cat(sprintf("  %s: %.3f\n", var, var_contrib$coord[var, 2]))
-  }
-  cat("\n")
-  cat("QUALITY OF REPRESENTATION (Cos2):\n")
-  cat("----------------------------------\n")
-  total_cos2 <- rowSums(var_contrib$cos2[, 1:2])
-  well_represented <- names(total_cos2[total_cos2 > 0.6])
-  poorly_represented <- names(total_cos2[total_cos2 < 0.4])
-  
-  if (length(well_represented) > 0) {
-    cat("Well represented variables (Cos2 > 0.6):", paste(well_represented, collapse = ", "), "\n")
-  }
-  if (length(poorly_represented) > 0) {
-    cat("Poorly represented variables (Cos2 < 0.4):", paste(poorly_represented, collapse = ", "), "\n")
-  }
-  cat("\n")
-  cat("SUMMARY:\n")
-  cat("--------\n")
-  cat(sprintf("- First two components explain %.1f%% of total variance\n", sum(eigenvalues$variance.percent[1:2])))
-  cat(sprintf("- Component 1 primarily represents: %s\n", paste(pc1_top[1:2], collapse = " and ")))
-  cat(sprintf("- Component 2 primarily represents: %s\n", paste(pc2_top[1:2], collapse = " and ")))
-  
-  return(list(
-    pc1_contributors = pc1_top,
-    pc2_contributors = pc2_top,
-    well_represented = well_represented,
-    poorly_represented = poorly_represented
-  ))
-}
-```
-
-``` r
-create_correlation_circle <- function(pca_result) {
-  cat("Creating correlation circle...\n")
-  corr_circle <- fviz_pca_var(
-    pca_result,
-    col.var = "contrib",
-    gradient.cols = c("blue", "yellow", "red"),
-    repel = TRUE,
-    title = "Correlation Circle - Variable Relationships",
-    legend.title = "Contribution"
-    ) +
-    theme_minimal() +
-    geom_circle(
-      aes(x0 = 0, y0 = 0, r = 1), 
-      color = "gray",
-      linetype = "dashed",
-      inherit.aes = FALSE
-      ) +
-    xlim(-1.2, 1.2) + ylim(-1.2, 1.2)
-  print(corr_circle)
-  return(corr_circle)
-}
-```
-
-``` r
-run_complete_pca_analysis <- function(nir_data) {
-  cat("=== Starting Complete PCA Analysis of Milk Quality Targets ===\n\n")
-  pca_data <- prepare_pca_data(nir_data)
-  pca_result <- run_pca_analysis(pca_data, scale_data = TRUE)
-  eigenvalues <- analyze_eigenvalues(pca_result)
-  var_contrib <- analyze_variable_contributions(pca_result)
-  biplots <- create_pca_biplots(pca_result, pca_data)
-  analyze_supplementary_variables(pca_result)
-  corr_circle <- create_correlation_circle(pca_result)
-  interpretation <- interpret_pca_results(pca_result, eigenvalues, var_contrib)
-  
-  cat("\n=== PCA Analysis Complete ===\n")
-  
-  return(list(
-    pca_result = pca_result,
-    pca_data = pca_data,
-    eigenvalues = eigenvalues,
-    var_contrib = var_contrib,
-    biplots = biplots,
-    corr_circle = corr_circle,
-    interpretation = interpretation
-  ))
-}
-```
-
-``` r
-pca_analysis_results <- run_complete_pca_analysis(nir_data)
-#> === Starting Complete PCA Analysis of Milk Quality Targets ===
-#> 
-#> === Preparing Data for PCA Analysis ===
-#> Dataset dimensions: 1080 samples x 10 variables
-#> Target variables: fat_percent, protein_percent, scc_thous_per_ml, lactose_percent
-#> Additional quantitative variables: dim_days, daily_milking, milk_wt_lbs
-#> Supplementary categorical variables: lact, grp
-#> 
-#> === Running PCA Analysis ===
-#> PCA completed successfully!
-#> Number of components: 5 
-#> Scaling applied: TRUE 
-#> 
-#> === Eigenvalue Analysis ===
-#>       eigenvalue variance.percent cumulative.variance.percent
-#> Dim.1      2.124           42.488                      42.488
-#> Dim.2      1.078           21.551                      64.039
-#> Dim.3      0.964           19.286                      83.325
-#> Dim.4      0.608           12.161                      95.486
-#> Dim.5      0.226            4.514                     100.000
-```
-
-<img src="man/figures/README-unnamed-chunk-42-1.png" width="100%" style="display: block; margin: auto;" /><img src="man/figures/README-unnamed-chunk-42-2.png" width="100%" style="display: block; margin: auto;" />
-
-    #> === Variable Contributions Analysis ===
-    #> Variable coordinates on PC1 and PC2:
-    #>                  Dim.1  Dim.2
-    #> fat_percent      0.743  0.163
-    #> protein_percent  0.919 -0.005
-    #> scc_thous_per_ml 0.124  0.762
-    #> lactose_percent  0.844 -0.252
-    #> tube_number      0.002  0.638
-    #> 
-    #> Variable contributions to PC1 and PC2 (%):
-    #>                  Dim.1 Dim.2
-    #> fat_percent      25.96  2.47
-    #> protein_percent  39.78  0.00
-    #> scc_thous_per_ml  0.73 53.91
-    #> lactose_percent  33.53  5.90
-    #> tube_number       0.00 37.72
-    #> 
-    #> Cos2 (quality of representation) for PC1 and PC2:
-    #>                  Dim.1 Dim.2
-    #> fat_percent      0.552 0.027
-    #> protein_percent  0.845 0.000
-    #> scc_thous_per_ml 0.015 0.581
-    #> lactose_percent  0.712 0.064
-    #> tube_number      0.000 0.406
-
-<img src="man/figures/README-unnamed-chunk-42-3.png" width="100%" style="display: block; margin: auto;" /><img src="man/figures/README-unnamed-chunk-42-4.png" width="100%" style="display: block; margin: auto;" /><img src="man/figures/README-unnamed-chunk-42-5.png" width="100%" style="display: block; margin: auto;" />
-
-    #> === Creating PCA Biplots ===
-
-<img src="man/figures/README-unnamed-chunk-42-6.png" width="100%" style="display: block; margin: auto;" /><img src="man/figures/README-unnamed-chunk-42-7.png" width="100%" style="display: block; margin: auto;" /><img src="man/figures/README-unnamed-chunk-42-8.png" width="100%" style="display: block; margin: auto;" /><img src="man/figures/README-unnamed-chunk-42-9.png" width="100%" style="display: block; margin: auto;" />
-
-    #> === Supplementary Variables Analysis ===
-    #> Supplementary Quantitative Variables Coordinates:
-    #>                Dim.1  Dim.2
-    #> dim_days       0.201  0.140
-    #> daily_milking  0.146 -0.012
-    #> milk_wt_lbs   -0.085 -0.197
-
-<img src="man/figures/README-unnamed-chunk-42-10.png" width="100%" style="display: block; margin: auto;" />
-
-    #> Supplementary Qualitative Variables:
-    #> Coordinates of category centroids:
-    #>         Dim.1  Dim.2
-    #> lact_1  0.038 -0.129
-    #> lact_2  0.292 -0.003
-    #> lact_3  0.034 -0.110
-    #> lact_4 -0.093  0.479
-    #> lact_5 -0.186  0.141
-    #> lact_6 -1.202  0.369
-    #> lact_7 -0.578  0.612
-    #> A1      0.016  0.015
-    #> B2     -0.020 -0.018
-    #> 
-    #> Cos2 of categories:
-    #>        Dim.1 Dim.2
-    #> lact_1 0.032 0.369
-    #> lact_2 0.661 0.000
-    #> lact_3 0.013 0.136
-    #> lact_4 0.026 0.693
-    #> lact_5 0.208 0.119
-    #> lact_6 0.823 0.077
-    #> lact_7 0.375 0.420
-    #> A1     0.022 0.019
-    #> B2     0.022 0.019
-
-<img src="man/figures/README-unnamed-chunk-42-11.png" width="100%" style="display: block; margin: auto;" />
-
-    #> Creating correlation circle...
-
-<img src="man/figures/README-unnamed-chunk-42-12.png" width="100%" style="display: block; margin: auto;" />
-
-    #> === PCA Results Interpretation ===
-    #> COMPONENT INTERPRETATION:
-    #> ------------------------
-    #> PC1 (42.5% variance):
-    #> - Main contributors: protein_percent, lactose_percent, fat_percent 
-    #> - Loadings (coordinates):
-    #>   protein_percent: 0.919
-    #>   lactose_percent: 0.844
-    #>   fat_percent: 0.743
-    #> 
-    #> PC2 (21.6% variance):
-    #> - Main contributors: scc_thous_per_ml, tube_number, lactose_percent 
-    #> - Loadings (coordinates):
-    #>   scc_thous_per_ml: 0.762
-    #>   tube_number: 0.638
-    #>   lactose_percent: -0.252
-    #> 
-    #> QUALITY OF REPRESENTATION (Cos2):
-    #> ----------------------------------
-    #> Well represented variables (Cos2 > 0.6): protein_percent, lactose_percent 
-    #> 
-    #> SUMMARY:
-    #> --------
-    #> - First two components explain 64.0% of total variance
-    #> - Component 1 primarily represents: protein_percent and lactose_percent
-    #> - Component 2 primarily represents: scc_thous_per_ml and tube_number
-    #> 
-    #> === PCA Analysis Complete ===
-
-    if (is.matrix(pca_analysis_results$eigenvalues)) {
-      pca_analysis_results$eigenvalues <- as.data.frame(pca_analysis_results$eigenvalues)
-    }
-
-    cat("\n=== Quick PCA Summary ===\n")
-    #> 
-    #> === Quick PCA Summary ===
-    cat("Variance explained by PC1:", round(pca_analysis_results$eigenvalues$variance.percent[1], 1), "%\n")
-    #> Variance explained by PC1: 42.5 %
-    cat("Variance explained by PC2:", round(pca_analysis_results$eigenvalues$variance.percent[2], 1), "%\n")
-    #> Variance explained by PC2: 21.6 %
-    cat("Total variance explained by PC1+PC2:", 
-        round(sum(pca_analysis_results$eigenvalues$variance.percent[1:2]), 1), "%\n")
-    #> Total variance explained by PC1+PC2: 64 %
-    cat("Main PC1 contributors:", paste(pca_analysis_results$interpretation$pc1_contributors[1:2], collapse = ", "), "\n")
-    #> Main PC1 contributors: protein_percent, lactose_percent
-    cat("Main PC2 contributors:", paste(pca_analysis_results$interpretation$pc2_contributors[1:2], collapse = ", "), "\n")
-    #> Main PC2 contributors: scc_thous_per_ml, tube_number
-
-## Modeling
-
-### Data preparation
-
-``` r
-prepare_modeling_data <- function(nir_data, use_interpolated = FALSE) {
-  cat("Preparing data for modeling...\n")
-  if (use_interpolated && exists("interpolated_data")) {
-    spectral_data <- interpolated_data$data
-    cat("Using interpolated spectral data\n")
-  } else {
-    spectral_data <- nir_data$corrected_spectra
-    cat("Using original corrected spectral data\n")
-  }
-  
-  spectral_features <- spectral_data %>%
-    select(tube_number, sensor, spec_array) %>%
-    mutate(tube_number = as.character(tube_number)) %>%
-    rowwise() %>%
-    mutate(
-      spec_data = list(setNames(as.numeric(spec_array), paste0("wl_", 1:length(spec_array))))
-    ) %>%
-    ungroup() %>%
-    select(-spec_array) %>%
-    unnest_wider(spec_data)
-  
-  lab_data <- nir_data$lab_results %>%
-    select(
-      tube_number, fat_percent, protein_percent, scc_thous_per_ml, lactose_percent,
-      barnname, lact, grp, dim_days, daily_milking, milk_wt_lbs
-      ) %>%
-    filter(
-      !is.na(fat_percent), 
-      !is.na(protein_percent), 
-      !is.na(scc_thous_per_ml), 
-      !is.na(lactose_percent)
-      )
-  
-  modeling_data <- spectral_features %>%
-    inner_join(lab_data, by = "tube_number") %>%
-    filter(if_all(starts_with("wl_"), ~ !is.na(.x)))
-  
-  cat("Final dataset dimensions:", nrow(modeling_data), "x", ncol(modeling_data), "\n")
-  cat("Number of spectral features:", sum(grepl("^wl_", names(modeling_data))), "\n")
-  
-  return(modeling_data)
-}
-```
-
-### Data splits and preprocessing
-
-``` r
-create_modeling_workflow <- function(modeling_data, target_variable) {
+models_workflow <- function(modeling_data, target_variable) {
   cat(sprintf("\n=== Creating workflow for %s ===\n", target_variable))
-  data_split <- initial_split(modeling_data, prop = 0.8, strata = all_of(target_variable))
+  
+  data_split <- initial_split(
+    modeling_data, 
+    prop = 0.8, 
+    strata = all_of(target_variable)
+    )
+  
   train_data <- training(data_split)
   test_data <- testing(data_split)
+  
   cat("Training set:", nrow(train_data), "samples\n")
   cat("Test set:", nrow(test_data), "samples\n")
+  
   cv_folds <- vfold_cv(train_data, v = 5, strata = all_of(target_variable))
   
-  recipe_spec <- recipe(as.formula(paste(target_variable, "~ .")), data = train_data) %>%
+  recipe_spec <- recipe(
+    as.formula(paste(target_variable, "~ .")), 
+    data = train_data
+    ) %>%
     step_rm(tube_number, sensor) %>%
-    step_dummy(all_nominal_predictors()) %>%
     step_zv(all_predictors()) %>%
-    step_corr(all_numeric_predictors(), threshold = 0.95) %>%
-    step_normalize(all_numeric_predictors()) %>%
-    step_pca(starts_with("wl_"), threshold = 0.95, prefix = "PC")
+    step_center(all_numeric_predictors())
+  
   return(list(
     split = data_split,
     train = train_data,
@@ -1864,61 +1136,75 @@ create_modeling_workflow <- function(modeling_data, target_variable) {
 }
 ```
 
-### Models tuning and evaluation
+## Models tuning and evaluation
 
 ``` r
-define_models <- function() {
+models_def <- function() {
   cat("Defining model specifications...\n")
-  rf_spec <- rand_forest(
-    mtry = tune(),
-    trees = tune(),
-    min_n = tune()
-  ) %>%
+  
+  rf_spec <- rand_forest() %>%
+    set_args(
+      mtry = tune(),
+      trees = tune(),
+      min_n = tune()
+      ) %>%
     set_engine("ranger", importance = "impurity") %>%
     set_mode("regression")
   
-  elastic_spec <- linear_reg(
-    penalty = tune(),
-    mixture = tune()
-  ) %>%
+  elastic_spec <- linear_reg() %>%
+    set_args(
+      penalty = tune(),
+      mixture = tune()
+      ) %>%
     set_engine("glmnet") %>%
     set_mode("regression")
   
-  xgb_spec <- boost_tree(
-    trees = tune(),
-    tree_depth = tune(),
-    learn_rate = tune(),
-    min_n = tune()
-  ) %>%
+  xgb_spec <- boost_tree() %>%
+    set_args(
+      trees = tune(), 
+      tree_depth = tune(), 
+      learn_rate = tune(), 
+      min_n = tune()
+      ) %>%
     set_engine("xgboost") %>%
     set_mode("regression")
   
-  svm_spec <- svm_rbf(
-    cost = tune(),
-    rbf_sigma = tune()
-  ) %>%
-    set_engine("kernlab") %>%
-    set_mode("regression")
+  spls_spec <- pls() %>%
+  set_args(
+    predictor_prop = tune(), 
+    num_comp = tune()
+    ) %>%
+  set_engine("mixOmics") %>%
+  set_mode("regression")
   
   return(list(
     random_forest = rf_spec,
     elastic_net = elastic_spec,
     xgboost = xgb_spec,
-    svm = svm_spec
+    spls = spls_spec
   ))
 }
 ```
 
 ``` r
-tune_and_evaluate_models <- function(workflow_data, models, target_variable) {
+models_eval <- function(workflow_data, models, target_variable) {
   cat(sprintf("Tuning models for %s...\n", target_variable))
+  
+  if (Sys.info()["sysname"] == "Darwin") {
+    plan(multicore, workers = min(parallel::detectCores() - 2, 8))
+    } else {
+      plan(multisession, workers = parallel::detectCores() - 1)
+      }
+  
   results <- list()
+
   for (model_name in names(models)) {
     cat(sprintf("Processing %s...\n", model_name))
+
     workflow_spec <- workflow() %>%
       add_recipe(workflow_data$recipe) %>%
       add_model(models[[model_name]])
-    
+
     if (model_name == "random_forest") {
       tune_grid <- grid_regular(
         mtry(range = c(5, 20)),
@@ -1940,38 +1226,46 @@ tune_and_evaluate_models <- function(workflow_data, models, target_variable) {
         min_n(range = c(5, 20)),
         levels = 3
       )
-    } else if (model_name == "svm") {
+    } else if (model_name == "spls") {
       tune_grid <- grid_regular(
-        cost(),
-        rbf_sigma(),
-        levels = 4
+        spectral_features(),
+        num_comp(),
+        levels = 5
       )
     }
+
+    ctrl_grid <- control_grid(
+      verbose = TRUE,
+      allow_par = TRUE,
+      save_pred = TRUE,
+      save_workflow = FALSE,
+      parallel_over = "resamples"
+    )
     
     tune_results <- workflow_spec %>%
       tune_grid(
         resamples = workflow_data$cv_folds,
         grid = tune_grid,
         metrics = metric_set(rmse, rsq, mae),
-        control = control_grid(save_pred = TRUE, verbose = FALSE)
+        control = ctrl_grid
       )
-    
+
     best_params <- tune_results %>%
       select_best(metric = "rmse")
-    
+
     final_workflow <- workflow_spec %>%
       finalize_workflow(best_params)
-    
+
     final_fit <- final_workflow %>%
       fit(workflow_data$train)
-    
+
     test_predictions <- final_fit %>%
       predict(workflow_data$test) %>%
       bind_cols(workflow_data$test %>% select(all_of(target_variable)))
-    
+
     test_metrics <- test_predictions %>%
       metrics(truth = !!sym(target_variable), estimate = .pred)
-    
+
     results[[model_name]] <- list(
       tune_results = tune_results,
       best_params = best_params,
@@ -1984,11 +1278,12 @@ tune_and_evaluate_models <- function(workflow_data, models, target_variable) {
 }
 ```
 
-### Model performance comparison
+## Model performance comparison
 
 ``` r
-compare_model_performance <- function(model_results, target_variable) {
+models_performance <- function(model_results, target_variable) {
   cat(sprintf("\n=== Model Performance Comparison for %s ===\n", target_variable))
+  
   performance_summary <- map_dfr(model_results, ~ {
     .x$test_metrics %>%
       filter(.metric %in% c("rmse", "rsq", "mae")) %>%
@@ -2012,7 +1307,7 @@ compare_model_performance <- function(model_results, target_variable) {
       y = "RMSE",
       fill = "Model"
     ) +
-    theme_minimal() +
+    theme_light() +
     theme(legend.position = "none")
   
   p2 <- performance_summary %>%
@@ -2026,7 +1321,7 @@ compare_model_performance <- function(model_results, target_variable) {
       y = "R²",
       fill = "Model"
     ) +
-    theme_minimal() +
+    theme_light() +
     theme(legend.position = "none")
   
   print(p1 / p2)
@@ -2034,12 +1329,13 @@ compare_model_performance <- function(model_results, target_variable) {
 }
 ```
 
-### Prediction plots
+## Prediction plots
 
 ``` r
-create_prediction_plots <- function(model_results, target_variable) {
+prediction_plots <- function(model_results, target_variable) {
   plots <- map(names(model_results), ~ {
     predictions <- model_results[[.x]]$test_predictions
+    
     predictions %>%
       ggplot(aes(x = !!sym(target_variable), y = .pred)) +
       geom_point(alpha = 0.6) +
@@ -2049,21 +1345,25 @@ create_prediction_plots <- function(model_results, target_variable) {
         x = paste("Actual", target_variable),
         y = paste("Predicted", target_variable)
       ) +
-      theme_minimal()
+      theme_light()
   })
+  
   names(plots) <- names(model_results)
   combined_plot <- wrap_plots(plots, ncol = 2)
+  
   print(combined_plot)
   return(plots)
 }
 ```
 
-### Feature Importance
+## Feature Importance
 
 ``` r
-extract_feature_importance <- function(model_results, target_variable, top_n = 15) {
+feature_importance <- function(model_results, target_variable, top_n = 15) {
   cat(sprintf("\nExtracting feature importance for %s...\n", target_variable))
+  
   importance_plots <- list()
+  
   for (model_name in names(model_results)) {
     tryCatch({
       if (model_name %in% c("random_forest", "xgboost")) {
@@ -2078,10 +1378,47 @@ extract_feature_importance <- function(model_results, target_variable, top_n = 1
       cat(sprintf("Could not extract importance for %s: %s\n", model_name, e$message))
     })
   }
+  
   if (length(importance_plots) > 0) {
     combined_importance <- wrap_plots(importance_plots, ncol = 2)
     print(combined_importance)
   }
+  
   return(importance_plots)
+}
+```
+
+``` r
+run_milk_quality_prediction <- function(
+    data, 
+    targets = c("fat_percent", "protein_percent", "scc_thous_per_ml", "lactose_percent")
+    ) {
+  
+  cat("=== NIRS Milk Quality Prediction Analysis ===\n")
+  
+  models <- models_def()
+  all_results <- list()
+  all_performance <- list()
+  
+  for (target in targets) {
+    cat(sprintf("\n\n### PROCESSING TARGET: %s ###\n", target))
+    
+    workflow_data <- models_workflow(modeling_data, target)
+    model_results <- models_eval(workflow_data, models, target)
+    performance <- models_performance(model_results, target)
+    pred_plots <- prediction_plots(model_results, target)
+    importance_plots <- feature_importance(model_results, target)
+    
+    all_results[[target]] <- model_results
+    all_performance[[target]] <- performance
+  }
+  cat("\n=== Analysis Complete! ===\n")
+  cat("Results stored in all_results and all_performance\n")
+  
+  return(list(
+    results = all_results,
+    performance = all_performance,
+    modeling_data = modeling_data
+  ))
 }
 ```

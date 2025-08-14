@@ -30,6 +30,7 @@ The dataset is organized as follows:
 * I have implemented a 'reselection' that uses the timestamp from the milking parlor as to when the cow was removed from the milker, MOSTLY this works well.
 * ~~I've noticed a few situatinos where some cows have a huge milk output but we don't see it, I'm not sure what to make of this, if we just never saw the milk because of some nyquist sampling issue or if it's a real issue in the data that nees to be addressed.~~ 
 * ^^ I found a that the clock sources were off by a bit of time, and we're also probably missing times when the tube is full of milk.  Such is the data. 
+* ^^^ I found that the Endtime timestamp is actually a Starttime, and that sorted out a LOT of the weird data that I was seeing.
 
 ## CHANGELOG
 
@@ -39,6 +40,11 @@ The dataset is organized as follows:
    - Full dataset with all the data.
    - The spectra are now in parquet format
    - nm_1234* columns have been replaced with a 'spec_array' array column to save having to pivot data, the corresponding wavelengths are in the 'wavelengths' column in sensor.csv
+1. ** Updates **
+   - Removed the "most empty" spectra from the dataset, there's no milk in the tube, there's nothing to find in there.
+   - Found some missing data and added it back.
+   - Adjusted timestamp selection to recognize that "endtime" timestamp is actually a starttime.
+   - Stall 4 nearly never clears the milk tube, so I am curious to see the differences in that vs the other sensors
 
 
 ## Files
