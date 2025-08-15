@@ -128,7 +128,10 @@ sensor_wavelengths_list <- nir_data$sensor_data %>%
     ) %>%
   select(sensor, wavelength_chars) %>%
   deframe()
-glimpse(sensor_wavelengths_list)
+```
+
+```{r}
+sensor_wavelengths_list %>% glimpse()
 ```
 
 ```{r}
@@ -170,7 +173,10 @@ spec_data <- nir_data$corrected_spectra %>%
   select(-spec_array, -spec_valid) %>%
   unnest_wider(df) %>%
   relocate(sensor, .before = tube_number)
-print(spec_data)
+```
+
+```{r}
+spec_data
 ```
 
 ```{r}
@@ -204,8 +210,11 @@ lab_data <- nir_data$lab_results %>%
     misc_solids = other_solids_percent,
     nonfat_solids = solids_not_fat_percent,
     tot_solids = total_solids_percent
-  ) %>%
-  print()
+  )
+```
+
+```{r}
+lab_data
 ```
 
 ```{r}
@@ -227,32 +236,25 @@ cat("Final dataset dimensions:", nrow(modeling_data), "x", ncol(modeling_data), 
 cat("Number of wavelenghts:", sum(grepl("^X", names(modeling_data))), "\n")
 ```
 
-```{r}
-modeling_data %>%
-  select(sensor, starts_with("X")) %>%
-  group_by(sensor) %>%
-  summarise(
-    observations = n(),
-    variables = ncol(.) - 1,
-    total_cells = n() * ncol(.),
-    missing_values = sum(is.na(.)),
-    completeness = round((1 - sum(is.na(.)) / (n() * ncol(.))) * 100, 1),
-    .groups = 'drop'
-  ) %>%
-  arrange(sensor)
-```
-
 ## Observations by Sensor
 
 ```{r}
 sensor_summary <- modeling_data %>%
-    select(sensor, tube_number, starts_with("X")) %>%
-    group_by(sensor, tube_number) %>%
-    summarise(
-        observations = n(),
-        variables = ncol(.) - 2,
-        .groups = 'drop'
-    )
+  select(sensor, tube_number, starts_with("X")) %>%
+  group_by(sensor, tube_number) %>%
+  summarise(
+    observations = n(),
+    variables = ncol(.) - 2,
+    total_cells = n() * ncol(.),
+    missing_values = sum(is.na(.)),
+    completeness = round((1 - sum(is.na(.)) / (n() * ncol(.))) * 100, 1),
+    .groups = "drop"
+  ) %>%
+  arrange(sensor)
+```
+
+```{r}
+sensor_summary
 ```
 
 ```{r}
@@ -331,6 +333,7 @@ sensor_summary %>%
       by = 5
       )
     )
+
 ```
 
 ## Measurement timeline
@@ -350,8 +353,11 @@ temporal_summary <- nir_data$corrected_spectra %>%
       units = "hours"
     )),
     .groups = "drop"
-  ) %>%
-  print()
+  )
+```
+
+```{r}
+temporal_summary
 ```
 
 ```{r}
@@ -388,7 +394,7 @@ nir_data$corrected_spectra %>%
   )
 ```
 
-## Spectra
+## NIR Spectra
 
 ```{r}
 source(paste0(functions_path, "visualize_nirs_time_series.R"))
@@ -398,70 +404,97 @@ source(paste0(functions_path, "visualize_nirs_time_series.R"))
 visualize_nirs_time_series(nir_data, "sensor_1", min_measurements = 2, seed = 100)
 ```
 
+```{r}
+wavelengths_sorted <- sort(as.numeric(sensor_wavelengths_list$sensor_1))
+```
+
+```{r}
+modeling_data %>%
+  filter(sensor == "sensor_1") %>%
+  select(tube_number, fat, starts_with("X")) %>%
+  slice_sample(n = 30) %>%  # Only take 5 samples
+  setNames(c("tube_number", "fat", wavelengths_sorted)) %>%
+  pivot_longer(
+    cols = !c(fat, tube_number),
+    names_to = "Wavelength",
+    values_to = "Intensity"
+  ) %>%
+  mutate(Wavelength = as.numeric(Wavelength)) %>%
+  ggplot(aes(x = Wavelength, y = Intensity, group = tube_number, color = fat)) +
+  geom_line(alpha = 0.7) +
+  scale_color_viridis_c(name = "Fat Content", option = "plasma") +
+  labs(
+    title = "NIRS Spectra by Fat Content",
+    x = "Wavelength (nm)",
+    y = "Intensity"
+  ) +
+  theme_minimal()
+```
+
 # Exploratory Data Analysis
 
 ## Descriptive statistics for milk quality target variables
 
 ```{r}
-source(paste0(functions_path, "calculate_target_statistics.R"))
-source(paste0(functions_path, "create_distribution_plots.R"))
-source(paste0(functions_path, "analyze_correlations.R"))
-source(paste0(functions_path, "analyze_by_groups.R"))
-source(paste0(functions_path, "identify_outliers.R"))
+lab_data %>% 
+  select(all_of(targets)) %>%
+  specProc::summaryStats()
 ```
 
 ```{r}
-run_descriptive_analysis <- function(nir_data) {
-  cat("Starting comprehensive descriptive analysis of target variables...\n\n")
-  stats_results <- calculate_target_statistics(nir_data)
-  dist_plots <- create_distribution_plots(stats_results$targets_data)
-  correlations <- analyze_correlations(stats_results$targets_data)
-  group_analysis <- analyze_by_groups(stats_results$targets_data)
-  outliers <- identify_outliers(stats_results$targets_data)
-  
-  cat("=== Comprehensive Data Summary (skimr) ===\n")
-  target_vars <- c("fat_percent", "protein_percent", "scc_thous_per_ml", "lactose_percent")
-  skim_summary <- stats_results$targets_data %>%
-    select(all_of(target_vars)) %>%
-    skim()
-  
-  print(skim_summary)
-  
-  cat("\n=== Analysis Complete ===\n")
-  cat("Key Insights:\n")
-  cat("- Total samples analyzed:", nrow(stats_results$targets_data), "\n")
-  cat("- Variables analyzed:", length(target_vars), "\n")
-  cat("- Correlation range:", round(min(correlations[correlations != 1]), 3), 
-      "to", round(max(correlations[correlations != 1]), 3), "\n")
-  
-  return(list(
-    summary_stats = stats_results$summary_stats,
-    targets_data = stats_results$targets_data,
-    distributions = dist_plots,
-    correlations = correlations,
-    group_analysis = group_analysis,
-    outliers = outliers,
-    skim_summary = skim_summary
-  ))
-}
+cor_matrix <- lab_data %>%
+  select(-sensor, -tube_number) %>%
+  cor(use = "complete.obs")
+
+corrplot(
+  cor_matrix,
+  method = "color",
+  type = "upper",
+  order = "hclust",
+  tl.cex = 0.8,
+  tl.col = "black",
+  addCoef.col = "black",
+  number.cex = 0.8,
+  title = "Correlation matrix of all variables",
+  mar = c(0, 0, 2, 0)
+)
+```
+
+```{r message=FALSE, warning=FALSE, fig.height=10, fig.width=10}
+lab_data %>%
+  select(-tube_number) %>%
+    ggpairs(
+      columns = 1:5,
+      ggplot2::aes(colour = sensor),
+      title = "Pairwise relationships between target variables"
+    )
 ```
 
 ```{r message=FALSE, warning=FALSE}
-descriptive_results <- run_descriptive_analysis(nir_data)
-cat("\n=== Quick Summary ===\n")
-cat("Mean values:\n")
-descriptive_results$summary_stats %>%
-  select(variable, mean) %>%
-  mutate(mean = round(mean, 3)) %>%
-  print()
+p <- lab_data %>% 
+  select(all_of(targets)) %>%
+  specProc::adjusted_boxplot()
 
-cat("\nCoefficient of Variation (CV%):\n")
-descriptive_results$summary_stats %>%
-  select(variable, cv) %>%
-  mutate(cv = round(cv, 2)) %>%
-  arrange(desc(cv)) %>%
-  print()
+p + facet_wrap(~ variable, scales = "free", ncol = 4) +
+  scale_fill_viridis_d(option = "viridis") +
+  labs(title = "Overall distribution of milk components") +
+  theme_light() +
+  theme(
+    panel.grid = element_blank(),
+    strip.text = element_text(size = 10, color = "black", face = "bold"),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank()
+    )
 ```
+
+```{r}
+lab_data %>% 
+  select(all_of(targets)) %>%
+  specProc::outlierplot(show.outlier = FALSE, show.mahal = TRUE) +
+  theme(strip.text = element_text(size = 10, color = "black", face = "bold"))
+```
+
+The color gradient shows multivariate outliers, i.e. samples that are unusual when considering all targets together. Blue points (high Mahalanobis distance) indicate values that are potantial outliers in the multivariate space, even if they might not be extreme outliers in individual targets.
 
 ## PCA analysis of milk quality targets
 
