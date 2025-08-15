@@ -201,8 +201,6 @@ process_nir_data <- function(verbose = FALSE) {
   for (sensor in sensor_folders) {
     if (verbose) {
       cat(paste("Processing", sensor, "...\n"))
-    } else {
-      cat(".")
     }
     if (is.null(parquet_data[[sensor]]$dark_spectra) || 
         length(parquet_data[[sensor]]$tube_spectra) == 0) {

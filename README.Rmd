@@ -3,8 +3,8 @@ output:
   github_document:
     toc: true
     toc_depth: 4
-    fig_width: 8
-    fig_height: 6
+    fig_width: 6
+    fig_height: 4
 ---
 
 <!-- README.md is generated from README.Rmd. Please edit that file -->
@@ -257,7 +257,7 @@ sensor_summary <- modeling_data %>%
 sensor_summary
 ```
 
-```{r}
+```{r fig.height=5}
 sensor_summary %>%
     group_by(sensor) %>%
     summarise(total_obs = sum(observations), .groups = 'drop') %>%

@@ -125,18 +125,6 @@ nir_data <- process_nir_data(verbose = FALSE)
 #> Processing CSV files...
 #> Processing parquet files...
 #> Performing baseline correction...
-#> .
-#> .
-#> .
-#> .
-#> .
-#> .
-#> .
-#> .
-#> .
-#> .
-#> .
-#> .
 #> 
 #> Data processing complete!
 ```
