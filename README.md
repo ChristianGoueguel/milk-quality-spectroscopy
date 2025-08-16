@@ -251,7 +251,7 @@ lab_data <- nir_data$lab_results %>%
     scc = scc_thous_per_ml,
     lactose = lactose_percent,
     weight = milk_wt_lbs,
-    misc_solids = other_solids_percent,
+    other_solids = other_solids_percent,
     nonfat_solids = solids_not_fat_percent,
     tot_solids = total_solids_percent
   )
@@ -260,18 +260,18 @@ lab_data <- nir_data$lab_results %>%
 ``` r
 lab_data
 #> # A tibble: 1,080 × 10
-#>    sensor   tube_number   fat protein   scc lactose weight misc_solids
-#>    <fct>    <fct>       <dbl>   <dbl> <dbl>   <dbl>  <dbl>       <dbl>
-#>  1 sensor_1 1             4.4     3.1     9     4.5   27.7         5.6
-#>  2 sensor_1 13            4       3.4   620     4.8   30.4         5.9
-#>  3 sensor_1 25            3.5     2.9   593     5     28.6         6.1
-#>  4 sensor_1 37            4.3     3.1    11     4.8   29.8         6  
-#>  5 sensor_1 49            2.2     2.5   394     4.7   46.5         5.8
-#>  6 sensor_1 61            4.1     3       9     5     34.2         6.1
-#>  7 sensor_1 73            3.6     3.1     8     4.9   33           6  
-#>  8 sensor_1 85            3.5     3.1   226     4.7   29.7         5.8
-#>  9 sensor_1 97            3.1     2.6    13     5     47.8         6.1
-#> 10 sensor_1 109           4.7     3.3    12     4.7   28           5.9
+#>    sensor   tube_number   fat protein   scc lactose weight other_solids
+#>    <fct>    <fct>       <dbl>   <dbl> <dbl>   <dbl>  <dbl>        <dbl>
+#>  1 sensor_1 1             4.4     3.1     9     4.5   27.7          5.6
+#>  2 sensor_1 13            4       3.4   620     4.8   30.4          5.9
+#>  3 sensor_1 25            3.5     2.9   593     5     28.6          6.1
+#>  4 sensor_1 37            4.3     3.1    11     4.8   29.8          6  
+#>  5 sensor_1 49            2.2     2.5   394     4.7   46.5          5.8
+#>  6 sensor_1 61            4.1     3       9     5     34.2          6.1
+#>  7 sensor_1 73            3.6     3.1     8     4.9   33            6  
+#>  8 sensor_1 85            3.5     3.1   226     4.7   29.7          5.8
+#>  9 sensor_1 97            3.1     2.6    13     5     47.8          6.1
+#> 10 sensor_1 109           4.7     3.3    12     4.7   28            5.9
 #> # ℹ 1,070 more rows
 #> # ℹ 2 more variables: nonfat_solids <dbl>, tot_solids <dbl>
 ```
@@ -617,161 +617,207 @@ p + facet_wrap(~ variable, scales = "free", ncol = 4) +
 
 <img src="man/figures/README-unnamed-chunk-31-1.png" width="100%" style="display: block; margin: auto;" />
 
+Counting the number of zero values across all target variables:
+
 ``` r
 lab_data %>% 
   select(all_of(targets)) %>%
+  summarise(across(everything(), ~ sum(.x == 0, na.rm = TRUE)))
+#> # A tibble: 1 × 4
+#>     fat protein   scc lactose
+#>   <int>   <int> <int>   <int>
+#> 1    11      11    39      11
+```
+
+These zero values probably represent missing or invalid data rather than
+true biological zeros, and might be better handled through imputation or
+exclusion rather than including them in the modeling.
+
+``` r
+lab_data %>% 
+  select(all_of(targets)) %>%
+  specProc::outlierplot(show.mahal = TRUE) +
+  theme(strip.text = element_text(size = 10, color = "black", face = "bold"))
+```
+
+<img src="man/figures/README-unnamed-chunk-33-1.png" width="100%" style="display: block; margin: auto;" />
+
+The color gradient shows the Mahalanobis distance, while the triangular
+shape indicates multivariate outliers, i.e. samples that are unusual
+when considering all targets together. Most variables show tight
+clustering. Fat, lactose, other_solids, and protein all show the
+majority of data points clustered tightly around zero with relatively
+few outliers. SCC shows much more variability, showing a broader spread
+of Mahalanobis distances.
+
+The yellow triangles in the fat, lactose, other_solids, and protein
+panels, represent extreme outliers with very high Mahalanobis distances.
+They have unusually low fat, lactose, other solids, and protein content
+compared to the normal population. Moreover, the fact that fat, protein,
+and lactose all have exactly 11 zeros suggests these might be the same
+samples with missing or problematic measurements. The 11 samples with
+zeros across multiple variables would definitely appear as extreme
+multivariate outliers (explaining some of those yellow triangular points
+at very negative values).
+
+SCC has a highly skewed distribution based on its box plot. This extreme
+right skew in SCC explains why it showed such different patterns in the
+outlier detection plot. The other variables (fat, protein, lactose) show
+more symmetric, normal-like distributions in their box plots, which is
+why their outliers in the Mahalanobis plot were primarily samples with
+unusually low values. For SCC, however, the natural distribution is so
+skewed that most “normal” samples cluster near zero. The outliers
+detected by the robust Mahalanobis method are likely the samples with
+moderately high SCC values that, while not extreme on the raw scale, are
+unusual in the context of the multivariate relationship with other milk
+components.
+
+``` r
+transf_list <- lab_data %>%
+  select(all_of(targets)) %>%
+  specProc::robustBCYJ(var = c("scc", "lactose"))
+```
+
+``` r
+transf_list %>%
+  pluck("transformation") %>%
+  bind_cols(lab_data %>% select(fat, protein)) %>%
+  relocate(c("scc", "lactose"), .after = protein) %>%
+  specProc::adjusted_boxplot() +
+  facet_wrap(~ variable, scales = "free", ncol = 4) +
+  scale_fill_viridis_d(option = "viridis") +
+  labs(title = "Robust Box-Cox transformation of SCC and lactose") +
+  theme_light() +
+  theme(
+    panel.grid = element_blank(),
+    strip.text = element_text(size = 10, color = "black", face = "bold"),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank()
+    )
+```
+
+<img src="man/figures/README-unnamed-chunk-35-1.png" width="100%" style="display: block; margin: auto;" />
+
+``` r
+transf_list %>%
+  pluck("transformation") %>%
+  bind_cols(lab_data %>% select(fat, protein)) %>%
+  relocate(c("scc", "lactose"), .after = protein) %>% 
   specProc::outlierplot(show.outlier = FALSE, show.mahal = TRUE) +
   theme(strip.text = element_text(size = 10, color = "black", face = "bold"))
 ```
 
-<img src="man/figures/README-unnamed-chunk-32-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-36-1.png" width="100%" style="display: block; margin: auto;" />
 
-The color gradient shows multivariate outliers, i.e. samples that are
-unusual when considering all targets together. Blue points (high
-Mahalanobis distance) indicate values that are potantial outliers in the
-multivariate space, even if they might not be extreme outliers in
-individual targets.
+After the Box-Cox transformation, SCC now shows a more symmetric
+distribution around zero, rather than the extreme right skew we saw in
+the original data. The transformation has successfully normalized the
+SCC distribution. The dark points (high Mahalanobis distance outliers)
+appear across all panels, suggesting these represent samples with
+genuinely unusual multivariate patterns rather than just extreme values
+driven by SCC’s original skewed distribution.
 
 ## PCA analysis of milk quality targets
 
-A principal component analysis (PCA) was conducted on four key milk
-composition variables: fat percentage, protein percentage, somatic cell
-count (SCC) per milliliter (thousands), and lactose percentage. The
-analysis aimed to understand the underlying structure of relationships
-between these variables and assess potential multicollinearity for
-subsequent modeling efforts.
+A principal component analysis (PCA) was conducted on the four key milk
+composition variables. The analysis aimed to understand the underlying
+structure of relationships between these variables and assess potential
+multicollinearity for subsequent modeling efforts.
 
 ``` r
-pca_data <- nir_data$lab_results %>%
-    select(
-      fat_percent, 
-      protein_percent, 
-      scc_thous_per_ml, 
-      lactose_percent,
-      dim_days, # days since the cow started producing milk
-      milk_wt_lbs, # weight of the milk in pounds
-      other_solids_percent, # other solids percentage in the milk
-      solids_not_fat_percent, # total solids that are not fat as a percentage
-      total_solids_percent, # total solids as a percentage in the milk
-      mun_mg_per_dl # total solids in milligrams per deciliter
-      ) %>%
-    filter(
-      !is.na(fat_percent), 
-      !is.na(protein_percent), 
-      !is.na(scc_thous_per_ml), 
-      !is.na(lactose_percent)
-    )
+pca_model <- lab_data %>%
+  select(all_of(targets), other_solids) %>%
+  PCA(scale.unit = TRUE, graph = FALSE)
 ```
 
 ``` r
-quanti_vars <- c(
-    "fat_percent", "protein_percent", "scc_thous_per_ml", "lactose_percent",
-    "other_solids_percent", "solids_not_fat_percent", "total_solids_percent",
-    "mun_mg_per_dl", "milk_wt_lbs", "dim_days"
-    )
+eigenvalues <- get_eigenvalue(pca_model)
 ```
 
 ``` r
-quanti_indices <- which(names(pca_data) %in% quanti_vars)
-```
-
-``` r
-pca_result <- PCA(
-    pca_data,
-    scale.unit = TRUE,
-    quanti.sup = if(length(setdiff(quanti_indices, 1:10)) > 0) {
-      setdiff(quanti_indices, 1:10)
-    } else NULL,
-    graph = FALSE
-  )
-```
-
-``` r
-scree_plot <- fviz_eig(
-    pca_result, 
-    addlabels = TRUE, 
+p1 <- pca_model %>%
+  fviz_eig(
+    addlabels = TRUE,
     ylim = c(0, 60),
     title = "Scree Plot",
     xlab = "Principal Components",
     ylab = "Percentage of Variance Explained"
-    ) +
-    theme_light() +
-    geom_hline(yintercept = 10, linetype = "dashed", color = "red", alpha = 0.7) +
-    labs(caption = "Red line indicates 10% variance threshold")
+  ) +
+  theme_light() +
+  labs(caption = "Red line indicates 10% variance threshold")
 
-eigenvalues <- get_eigenvalue(pca_result)
-cum_var_plot <- as.data.frame(eigenvalues) %>%
-    mutate(component = 1:nrow(.)) %>%
-    ggplot(aes(x = component, y = cumulative.variance.percent)) +
-    geom_line(size = 1.2, color = "steelblue") +
-    geom_point(size = 3, color = "steelblue") +
-    geom_hline(yintercept = 80, linetype = "dashed", color = "red", alpha = 0.7) +
-    scale_x_continuous(breaks = 1:nrow(eigenvalues)) +
-    labs(
-      title = "Cumulative Variance Explained",
-      x = "Principal Components",
-      y = "Cumulative Variance (%)",
-      caption = "Red line indicates 80% variance threshold"
-    ) +
-    theme_light()
+p2 <- eigenvalues %>%
+  as.data.frame() %>%
+  mutate(component = 1:nrow(.)) %>%
+  ggplot(aes(x = component, y = cumulative.variance.percent)) +
+  geom_line(size = 1.2, color = "steelblue") +
+  geom_point(size = 3, color = "steelblue") +
+  scale_x_continuous(breaks = 1:nrow(eigenvalues)) +
+  labs(
+    title = "Cumulative Variance Explained",
+    x = "Principal Components",
+    y = "Cumulative Variance (%)",
+    caption = "Red line indicates 80% variance threshold"
+  ) +
+  theme_light()
 ```
 
 ``` r
-scree_plot | cum_var_plot
-```
-
-<img src="man/figures/README-unnamed-chunk-38-1.png" width="100%" style="display: block; margin: auto;" />
-
-The PCA extracted two principal components that collectively explained
-67.6% of the total variance in the dataset. The first principal
-component accounted for 51.1% of the variance, while the second
-component explained an additional 16.5%.
-
-``` r
-contrib_pc1 <- fviz_contrib(
-  pca_result,
-  choice = "var",
-  axes = 1,
-  top = 10,
-  title = "Dim1",
-  fill = "steelblue",
-  color = "steelblue"
-  ) +
-  labs(x = "") +
-  theme_light() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-contrib_pc2 <- fviz_contrib(
-  pca_result,
-  choice = "var",
-  axes = 2,
-  top = 10,
-  title = "Dim2",
-  fill = "coral",
-  color = "coral"
-  ) +
-  labs(x = "") +
-  theme_light() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-contrib_combined <- fviz_contrib(
-  pca_result,
-  choice = "var",
-  axes = 1:2,
-  title = "Dim1 and Dim2",
-  fill = "darkgreen",
-  color = "darkgreen"
-  ) +
-  labs(x = "") +
-  theme_light() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-```
-
-``` r
-contrib_pc1 | contrib_pc2 | contrib_combined
+p1 | p2
 ```
 
 <img src="man/figures/README-unnamed-chunk-40-1.png" width="100%" style="display: block; margin: auto;" />
+
+The PCA extracted two principal components that collectively explained
+80.5% of the total variance in the dataset. The first principal
+component accounted for 58.9% of the variance, while the second
+component explained an additional 21.6%.
+
+``` r
+p3 <- pca_model %>%
+  fviz_contrib(
+    choice = "var",
+    axes = 1,
+    top = 10,
+    title = "Dim1",
+    fill = "steelblue",
+    color = "steelblue"
+  ) +
+  labs(x = "") +
+  theme_light() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p4 <- pca_model %>%
+  fviz_contrib(
+    choice = "var",
+    axes = 2,
+    top = 10,
+    title = "Dim2",
+    fill = "coral",
+    color = "coral"
+  ) +
+  labs(x = "") +
+  theme_light() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p5 <- pca_model %>%
+  fviz_contrib(
+    choice = "var",
+    axes = 1:2,
+    title = "Dim1 and Dim2",
+    fill = "darkgreen",
+    color = "darkgreen"
+  ) +
+  labs(x = "") +
+  theme_light() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+``` r
+p3 | p4 | p5
+```
+
+<img src="man/figures/README-unnamed-chunk-42-1.png" width="100%" style="display: block; margin: auto;" />
 
 Dim1 represents a milk composition axis, with relatively balanced
 contributions from multiple composition variables. The contribution
@@ -790,27 +836,14 @@ percentage contributing approximately 12% and SCC contributing
 approximately 10-12%.
 
 ``` r
-p1 <- fviz_pca_var(
-  pca_result,
-  col.var = "cos2",
-  gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
-  col.circle = "white",
-  repel = TRUE,
-  title = "Quality Assessment of Variable Projections",
-  legend.title = "Cos2"
-  ) +
-  theme_light() +
-  theme(panel.grid = element_blank())
-```
-
-``` r
-p2 <- fviz_pca_var(
-  pca_result,
-  col.var = "contrib",
-  gradient.cols = c("darkblue", "green", "darkred"),
-  repel = TRUE,
-  title = "Correlation Circle of Variable Relationships",
-  legend.title = "Contribution"
+p6 <- pca_model %>%
+  fviz_pca_var(
+    axes = c(1, 2),
+    col.var = "contrib",
+    gradient.cols = c("purple", "green", "red"),
+    repel = TRUE,
+    title = "Correlation Circle of Variable Relationships",
+    legend.title = "Contribution"
   ) +
   annotate(
     "circle",
@@ -819,17 +852,38 @@ p2 <- fviz_pca_var(
     linetype = "solid",
     linewidth = 0.1
   ) +
-  xlim(-1.01, 1.01) + 
+  xlim(-1.01, 1.01) +
+  ylim(-1.01, 1.01) +
+  theme_light() +
+  theme(panel.grid = element_blank())
+
+p7 <- pca_model %>%
+  fviz_pca_var(
+    axes = c(2, 3),
+    col.var = "contrib",
+    gradient.cols = c("purple", "green", "red"),
+    repel = TRUE,
+    title = "",
+    legend.title = "Contribution"
+  ) +
+  annotate(
+    "circle",
+    x = 0, y = 0,
+    color = "grey70",
+    linetype = "solid",
+    linewidth = 0.1
+  ) +
+  xlim(-1.01, 1.01) +
   ylim(-1.01, 1.01) +
   theme_light() +
   theme(panel.grid = element_blank())
 ```
 
 ``` r
-p1 | p2
+p6 | p7
 ```
 
-<img src="man/figures/README-unnamed-chunk-43-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-44-1.png" width="100%" style="display: block; margin: auto;" />
 
 The correlation circle and contribution analysis reveal a
 three-dimensional structure in the dataset:
@@ -847,6 +901,71 @@ three-dimensional structure in the dataset:
   reveals that higher milk production is associated with lower SCC,
   while lower production coincides with higher SCC (potentially
   indicating health issues affecting yield).
+
+``` r
+biplot <- function(model, axes = c(1, 2), col.ind = NULL, legend.title = NULL) {
+  p <- model %>%
+    fviz_pca_biplot(
+      axes = axes,
+      geom = "point",
+      col.ind = col.ind,
+      col.var = "black",
+      gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+      col.circle = "white",
+      repel = TRUE,
+      title = "",
+      legend.title = legend.title
+    ) +
+    theme_light() +
+    theme(panel.grid = element_blank())
+  
+  return(p)
+}
+```
+
+``` r
+(biplot(pca_model, c(1, 2), lab_data$scc, "SCC\n(10³ cells/mL)") |
+  biplot(pca_model, c(2, 3), lab_data$scc, "SCC\n(10³ cells/mL)")
+) + plot_layout(guides = "collect")
+```
+
+<img src="man/figures/README-unnamed-chunk-46-1.png" width="100%" style="display: block; margin: auto;" />
+
+``` r
+(biplot(pca_model, c(1, 3), lab_data$protein, "Protein\n(wt%)") |
+  biplot(pca_model, c(3, 4), lab_data$protein, "Protein\n(wt%)")
+) + plot_layout(guides = "collect")
+```
+
+<img src="man/figures/README-unnamed-chunk-47-1.png" width="100%" style="display: block; margin: auto;" />
+
+``` r
+(biplot(pca_model, c(2, 3), lab_data$fat, "Fat\n(wt%)") |
+  biplot(pca_model, c(3, 4), lab_data$fat, "Fat\n(wt%)")
+) + plot_layout(guides = "collect")
+```
+
+<img src="man/figures/README-unnamed-chunk-48-1.png" width="100%" style="display: block; margin: auto;" />
+
+``` r
+(biplot(pca_model, c(1, 3), lab_data$lactose, "Lactose\n(wt%)") |
+  biplot(pca_model, c(2, 4), lab_data$lactose, "Lactose\n(wt%)")
+) + plot_layout(guides = "collect")
+```
+
+<img src="man/figures/README-unnamed-chunk-49-1.png" width="100%" style="display: block; margin: auto;" />
+
+As previously observed, there’s a distinct point that’s completely
+isolated from the main data distribution. This observation indicated by
+the teal coloring occupies an extreme position in the principal
+component space, far removed from all other samples. The positioning of
+these observations as extreme outliers in the PCA space provides
+compelling evidence that they do not represent genuine biological
+variation in milk composition. Since principal components are
+constructed as linear combinations of all input variables, samples
+containing multiple zero values become mathematically projected to
+peripheral regions of the PC subspace, where they exert disproportionate
+influence on the overall data structure.
 
 ``` r
 pca_mod <- modeling_data %>%
@@ -931,7 +1050,7 @@ wrap_plots(p1, p2, ncol = 1) +
   plot_layout(guides = "collect")
 ```
 
-<img src="man/figures/README-unnamed-chunk-49-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-55-1.png" width="100%" style="display: block; margin: auto;" />
 
 The sensor differences are primarily captured by Dim3 (5.96% variance),
 while Dim1 and Dim2 (which together explain 71.38% + 14.13% = ~85.4% of
@@ -1023,7 +1142,7 @@ wrap_plots(p1, p2, ncol = 1) +
   plot_layout(guides = "collect")
 ```
 
-<img src="man/figures/README-unnamed-chunk-54-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-60-1.png" width="100%" style="display: block; margin: auto;" />
 
 # Modeling
 
