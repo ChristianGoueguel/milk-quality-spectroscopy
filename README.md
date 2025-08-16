@@ -335,31 +335,38 @@ sensor_summary
 
 ``` r
 sensor_summary %>%
-    group_by(sensor) %>%
-    summarise(total_obs = sum(observations), .groups = 'drop') %>%
-    mutate(sensor_num = as.numeric(str_extract(sensor, "\\d+"))) %>%
-    arrange(sensor_num) %>%
-    ggplot(aes(x = reorder(sensor, sensor_num), y = total_obs)) +
-    geom_col(fill = "steelblue", alpha = 0.8) +
-    geom_text(
-      aes(label = scales::comma(total_obs)),
-      vjust = -0.3, 
-      size = 3.5, 
-      fontface = "bold"
-      ) +
-    labs(
-        title = "Total Observations by Sensor",
-        subtitle = "Comparison across all 12 sensors",
-        x = "",
-        y = "Total Observations"
-    ) +
-    theme_minimal() +
-    theme(
-        axis.text.x = element_text(angle = 45, hjust = 1),
-        plot.title = element_text(face = "bold", size = 14),
-        panel.grid.minor = element_blank()
-    ) +
-    scale_y_continuous(labels = scales::comma)
+  group_by(sensor) %>%
+  summarise(total_obs = sum(observations), .groups = "drop") %>%
+  mutate(sensor_num = as.numeric(str_extract(sensor, "\\d+"))) %>%
+  arrange(sensor_num) %>%
+  ggplot(aes(x = reorder(sensor, sensor_num), y = total_obs, fill = sensor)) +
+  geom_col(alpha = 0.8) +
+  geom_text(
+    aes(label = scales::comma(total_obs)),
+    vjust = -0.3,
+    size = 3.5,
+    fontface = "bold"
+  ) +
+  scale_fill_manual(values = colorRampPalette(brewer.pal(9, "Blues"))(12)) +
+  scale_x_discrete(
+    limits = paste0("sensor_", 1:12),
+    labels = paste("Sensor", 1:12)
+  ) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Total Observations by Sensor",
+    subtitle = "Comparison across all 12 sensors",
+    x = "",
+    y = "Total Observations"
+  ) +
+  theme_grey() +
+  theme(
+    legend.position = "none",
+    panel.grid = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(face = "bold", size = 14),
+    panel.grid.minor = element_blank()
+  )
 ```
 
 <img src="man/figures/README-unnamed-chunk-19-1.png" width="100%" style="display: block; margin: auto;" />
@@ -387,13 +394,17 @@ sensor_summary %>%
     midpoint = median(sensor_summary$observations),
     name = "Observations"
   ) +
+  scale_y_discrete(
+    limits = paste0("sensor_", 12:1),
+    labels = paste("Sensor", 12:1)
+  ) +
   labs(
     title = "Observations Heatmap: All Sensors",
     subtitle = "X-axis shows tube position (1st, 2nd, 3rd, etc.) within each sensor",
     x = "Tube Position (ordered within sensor)",
     y = ""
   ) +
-  theme_minimal() +
+  theme_light() +
   theme(
     plot.title = element_text(face = "bold", size = 14),
     panel.grid = element_blank(),
@@ -418,74 +429,82 @@ sensor_summary %>%
 ## Measurement timeline
 
 ``` r
-temporal_summary <- nir_data$corrected_spectra %>%
-  mutate(datetime = as.POSIXct(datetime)) %>%
-  group_by(sensor) %>%
-  filter(spec_type == "SAMPLE") %>%
-  drop_na() %>%
-  summarise(
-    min_time = min(datetime, na.rm = TRUE),
-    max_time = max(datetime, na.rm = TRUE),
-    time_span_hours = as.numeric(difftime(
-      max(datetime, na.rm = TRUE),
-      min(datetime, na.rm = TRUE),
-      units = "hours"
-    )),
-    .groups = "drop"
-  )
-```
-
-``` r
-temporal_summary
-#> # A tibble: 12 × 4
-#>    sensor    min_time            max_time            time_span_hours
-#>    <chr>     <dttm>              <dttm>                        <dbl>
-#>  1 sensor_1  2025-06-30 22:43:44 2025-07-03 16:53:58            66.2
-#>  2 sensor_10 2025-06-30 22:49:27 2025-07-03 16:51:47            66.0
-#>  3 sensor_11 2025-06-30 22:49:40 2025-07-03 16:44:34            65.9
-#>  4 sensor_12 2025-06-30 22:50:23 2025-07-03 16:54:47            66.1
-#>  5 sensor_2  2025-06-30 22:43:59 2025-07-03 16:53:36            66.2
-#>  6 sensor_3  2025-06-30 22:44:42 2025-07-03 16:54:13            66.2
-#>  7 sensor_4  2025-06-30 22:43:03 2025-07-03 16:52:45            66.2
-#>  8 sensor_5  2025-06-30 22:55:09 2025-07-03 16:54:32            66.0
-#>  9 sensor_6  2025-06-30 22:45:30 2025-07-03 16:54:34            66.2
-#> 10 sensor_7  2025-06-30 22:50:03 2025-07-03 16:52:47            66.0
-#> 11 sensor_8  2025-06-30 22:48:41 2025-07-03 16:43:32            65.9
-#> 12 sensor_9  2025-06-30 22:49:05 2025-07-03 16:51:47            66.0
-```
-
-``` r
-nir_data$corrected_spectra %>%
+heatmap_data <- nir_data$corrected_spectra %>%
   mutate(datetime = as.POSIXct(datetime)) %>%
   filter(!is.na(datetime)) %>%
   filter(spec_type == "SAMPLE") %>%
   drop_na() %>%
-  ggplot(aes(x = datetime, y = sensor, color = sensor)) +
-  geom_point(
-    alpha = 0.6,
-    size = 0.5,
-    position = position_jitter(height = 0.2, width = 0)
+  mutate(
+    date_hour = floor_date(datetime, "hour"),
+    sensor_num = as.integer(str_extract(sensor, "\\d+"))
+  ) %>%
+  count(date_hour, sensor_num, name = "n_measurements")
+
+all_sensors <- as.integer(1:12)
+hour_range <- seq(
+  floor_date(min(heatmap_data$date_hour), "hour"),
+  ceiling_date(max(heatmap_data$date_hour), "hour") - hours(1),
+  by = "hour"
+)
+
+measurement_data <- nir_data$corrected_spectra %>%
+  mutate(datetime = as.POSIXct(datetime)) %>%
+  filter(!is.na(datetime)) %>%
+  filter(spec_type == "SAMPLE") %>%
+  drop_na() %>%
+  arrange(datetime, sensor)
+```
+
+``` r
+sequence_plot <- measurement_data %>%
+  ggplot(aes(x = datetime, y = factor(sensor), color = factor(sensor))) +
+  geom_linerange(
+    aes(
+      ymin = as.numeric(factor(sensor)) - 0.4,
+      ymax = as.numeric(factor(sensor)) + 0.4
+    ),
+    linewidth = 0.1,
+    alpha = 0.8
   ) +
-  ggsci::scale_color_ucscgb() +
+  ggsci::scale_color_d3(palette = "category20") +
+  scale_y_discrete(
+    limits = paste0("sensor_", 12:1),
+    labels = paste("Sensor", 12:1)
+  ) +
+  scale_x_datetime(
+    date_labels = "%m/%d\n%H:%M",
+    date_breaks = "6 hours",
+    minor_breaks = "1 hour",
+    expand = c(0.01, 0)
+  ) +
   labs(
-    title = "Measurement Timeline Across All Sensors",
+    title = "Sensor Sequence Temporal Pattern: Measurement Timeline",
     subtitle = sprintf(
-      "Total measurements: %d | Date range: %s to %s",
-      nrow(nir_data$corrected_spectra %>% filter(spec_type == "SAMPLE")),
-      format(min(temporal_summary$min_time), "%Y-%m-%d"),
-      format(max(temporal_summary$max_time), "%Y-%m-%d")
+      "Total measurements: %d | Period: %s to %s",
+      nrow(measurement_data),
+      format(min(measurement_data$datetime), "%Y-%m-%d %H:%M"),
+      format(max(measurement_data$datetime), "%Y-%m-%d %H:%M")
     ),
     x = "Date/Time",
     y = "",
-    caption = "Each point represents one spectral measurement"
+    caption = "Each vertical line = one measurement | Clear gaps show missing sensors in sequence\nLook for vertical alignment (simultaneous) vs diagonal patterns (sequential)"
   ) +
-  theme_minimal() +
+  theme_light() +
   theme(
     legend.position = "none",
-    panel.grid.minor = element_blank(),
+    panel.grid = element_blank(),
     plot.title = element_text(size = 14, face = "bold"),
-    plot.subtitle = element_text(size = 10, color = "gray40")
+    plot.subtitle = element_text(size = 10, color = "gray40"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+    axis.text.y = element_text(size = 9),
+    panel.background = element_rect(fill = "white"),
+    plot.background = element_rect(fill = "white"),
+    plot.margin = margin(10, 10, 10, 10)
   )
+```
+
+``` r
+print(sequence_plot)
 ```
 
 <img src="man/figures/README-unnamed-chunk-23-1.png" width="100%" style="display: block; margin: auto;" />
@@ -636,6 +655,7 @@ exclusion rather than including them in the modeling.
 ``` r
 lab_data %>% 
   select(all_of(targets)) %>%
+  # filter(if_all(everything(), ~ .x > 0)) %>% 
   specProc::outlierplot(show.mahal = TRUE) +
   theme(strip.text = element_text(size = 10, color = "black", face = "bold"))
 ```
@@ -702,7 +722,7 @@ transf_list %>%
 transf_list %>%
   pluck("transformation") %>%
   bind_cols(lab_data %>% select(fat, protein)) %>%
-  relocate(c("scc", "lactose"), .after = protein) %>% 
+  relocate(c("scc", "lactose"), .after = protein) %>%
   specProc::outlierplot(show.outlier = FALSE, show.mahal = TRUE) +
   theme(strip.text = element_text(size = 10, color = "black", face = "bold"))
 ```
@@ -774,47 +794,28 @@ component accounted for 58.9% of the variance, while the second
 component explained an additional 21.6%.
 
 ``` r
-p3 <- pca_model %>%
-  fviz_contrib(
-    choice = "var",
-    axes = 1,
-    top = 10,
-    title = "Dim1",
-    fill = "steelblue",
-    color = "steelblue"
-  ) +
-  labs(x = "") +
-  theme_light() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-p4 <- pca_model %>%
-  fviz_contrib(
-    choice = "var",
-    axes = 2,
-    top = 10,
-    title = "Dim2",
-    fill = "coral",
-    color = "coral"
-  ) +
-  labs(x = "") +
-  theme_light() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-p5 <- pca_model %>%
-  fviz_contrib(
-    choice = "var",
-    axes = 1:2,
-    title = "Dim1 and Dim2",
-    fill = "darkgreen",
-    color = "darkgreen"
-  ) +
-  labs(x = "") +
-  theme_light() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+pca_contrib <- function(model, axes, title, fill_color, top = 10) {
+  p <- model %>%
+    fviz_contrib(
+      choice = "var",
+      axes = axes,
+      top = top,
+      title = title,
+      fill = fill_color,
+      color = fill_color
+    ) +
+    labs(x = "") +
+    theme_light() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  return(p)
+}
 ```
 
 ``` r
-p3 | p4 | p5
+pca_contrib(pca_model, axes = 1, title = "Dim1", fill_color = "steelblue") |
+  pca_contrib(pca_model, axes = 2, title = "Dim2", fill_color = "coral") |
+  pca_contrib(pca_model, axes = 1:2, title = "Dim1 and Dim2", fill_color = "darkgreen")
 ```
 
 <img src="man/figures/README-unnamed-chunk-42-1.png" width="100%" style="display: block; margin: auto;" />
@@ -836,51 +837,35 @@ percentage contributing approximately 12% and SCC contributing
 approximately 10-12%.
 
 ``` r
-p6 <- pca_model %>%
-  fviz_pca_var(
+corr_circle <- function(
+    model,
     axes = c(1, 2),
-    col.var = "contrib",
-    gradient.cols = c("purple", "green", "red"),
-    repel = TRUE,
-    title = "Correlation Circle of Variable Relationships",
-    legend.title = "Contribution"
-  ) +
-  annotate(
-    "circle",
-    x = 0, y = 0,
-    color = "grey70",
-    linetype = "solid",
-    linewidth = 0.1
-  ) +
-  xlim(-1.01, 1.01) +
-  ylim(-1.01, 1.01) +
-  theme_light() +
-  theme(panel.grid = element_blank())
-
-p7 <- pca_model %>%
-  fviz_pca_var(
-    axes = c(2, 3),
-    col.var = "contrib",
-    gradient.cols = c("purple", "green", "red"),
-    repel = TRUE,
     title = "",
-    legend.title = "Contribution"
-  ) +
-  annotate(
-    "circle",
-    x = 0, y = 0,
-    color = "grey70",
-    linetype = "solid",
-    linewidth = 0.1
-  ) +
-  xlim(-1.01, 1.01) +
-  ylim(-1.01, 1.01) +
-  theme_light() +
-  theme(panel.grid = element_blank())
+    legend.title = "Contribution",
+    gradient.cols = c("#08519C", "#6BAED6", "#FD8D3C")
+    ) {
+  p <- model %>%
+    fviz_pca_var(
+      axes = axes,
+      col.var = "contrib",
+      gradient.cols = gradient.cols,
+      repel = TRUE,
+      title = title,
+      legend.title = legend.title,
+      col.circle = "black"
+    ) +
+    xlim(-1.01, 1.01) +
+    ylim(-1.01, 1.01) +
+    theme_light() +
+    theme(panel.grid = element_blank())
+  
+  return(p)
+}
 ```
 
 ``` r
-p6 | p7
+corr_circle(pca_model, title = "Correlation Circle of Variable Relationships") |
+  corr_circle(pca_model, axes = c(2, 3))
 ```
 
 <img src="man/figures/README-unnamed-chunk-44-1.png" width="100%" style="display: block; margin: auto;" />
