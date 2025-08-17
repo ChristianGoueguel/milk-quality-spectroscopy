@@ -5,6 +5,11 @@
   - [Important limitations](#important-limitations)
   - [Data evolution](#data-evolution)
 - [Data processing](#data-processing)
+  - [Data loading](#data-loading)
+  - [Sensor wavelengths](#sensor-wavelengths)
+  - [Sensor data](#sensor-data)
+  - [Laboratory data](#laboratory-data)
+  - [Cleaned data](#cleaned-data)
   - [Observations by Sensor](#observations-by-sensor)
   - [Measurement timeline](#measurement-timeline)
 - [Exploratory Data Analysis](#exploratory-data-analysis)
@@ -106,6 +111,8 @@ individual wavelength columns for more efficient storage and processing.
 set.seed(123)
 ```
 
+## Data loading
+
 ``` r
 dataset_path <- "Dataset/"
 functions_path <- "~/Documents/GitHub/milk-quality-spectroscopy/R/"
@@ -127,6 +134,8 @@ nir_data <- process_nir_data(verbose = FALSE)
 #> 
 #> Data processing complete!
 ```
+
+## Sensor wavelengths
 
 ``` r
 sensor_wavelengths_list <- nir_data$sensor_data %>%
@@ -171,6 +180,67 @@ sensor_wavelengths_list %>%
 #> 11 sensor_11  458. 1109.  650.      2.55     1.95     3.22   256
 #> 12 sensor_12  458. 1102.  643.      2.52     1.91     3.19   256
 ```
+
+``` r
+wavelength_tbl <- sensor_wavelengths_list %>%
+  map(as.numeric) %>%
+  map_dfr(~ tibble(wavelength = .x), .id = "sensor") %>%
+  group_by(sensor) %>%
+  mutate(channel = row_number()) %>%
+  ungroup() %>%
+  mutate(sensor_num = as.integer(str_extract(sensor, "\\d+")))
+
+median_by_channel <- wavelength_tbl %>%
+  group_by(channel) %>%
+  summarise(
+    channel_median = median(wavelength, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+``` r
+wavelength_tbl %>%
+  left_join(median_by_channel, by = "channel") %>%
+  mutate(deviation_from_median = abs(wavelength - channel_median)) %>%
+  ggplot() +
+  aes(
+    x = channel, 
+    y = factor(sensor_num, levels = 1:12), 
+    fill = deviation_from_median
+    ) +
+  geom_tile(color = "white", linewidth = 0.1) +
+  scale_fill_viridis_c(
+    name = "Deviation\n(nm)",
+    option = "plasma",
+    trans = "sqrt"
+  ) +
+  scale_x_continuous(
+    breaks = seq(0, 256, by = 32),
+    expand = c(0, 0)
+  ) +
+  scale_y_discrete(
+    labels = paste("Sensor", 12:1)
+  ) +
+  labs(
+    title = "Wavelength Deviation",
+    subtitle = "Each cell shows absolute deviation from the median wavelength at that channel",
+    x = "Wavelength Channel (1-256)",
+    y = ""
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "gray40"),
+    axis.text.x = element_text(size = 9),
+    axis.text.y = element_text(size = 9),
+    legend.position = "right"
+  )
+```
+
+<img src="man/figures/README-unnamed-chunk-11-1.png" width="100%" style="display: block; margin: auto;" />
+
+## Sensor data
 
 ``` r
 spec_data <- nir_data$corrected_spectra %>%
@@ -224,7 +294,9 @@ spec_data %>%
     )
 ```
 
-<img src="man/figures/README-unnamed-chunk-11-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-13-1.png" width="100%" style="display: block; margin: auto;" />
+
+## Laboratory data
 
 ``` r
 lab_data <- nir_data$lab_results %>%
@@ -264,18 +336,20 @@ lab_data <- nir_data$lab_results %>%
 lab_data %>% visdat::vis_dat()
 ```
 
-<img src="man/figures/README-unnamed-chunk-13-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-15-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
 lab_data %>% visdat::vis_miss()
 ```
 
-<img src="man/figures/README-unnamed-chunk-14-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-16-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
 targets <- lab_data %>% select(fat, protein, scc, lactose) %>% names()
 meta <- lab_data %>% select(-sensor, -tube_number, -all_of(targets)) %>% names()
 ```
+
+## Cleaned data
 
 ``` r
 modeling_data <- spec_data %>%
@@ -365,7 +439,7 @@ sensor_summary %>%
   )
 ```
 
-<img src="man/figures/README-unnamed-chunk-20-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-22-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
 sensor_summary %>%
@@ -420,7 +494,7 @@ sensor_summary %>%
     )
 ```
 
-<img src="man/figures/README-unnamed-chunk-21-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-23-1.png" width="100%" style="display: block; margin: auto;" />
 
 ## Measurement timeline
 
@@ -503,7 +577,7 @@ sequence_plot <- measurement_data %>%
 print(sequence_plot)
 ```
 
-<img src="man/figures/README-unnamed-chunk-24-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-26-1.png" width="100%" style="display: block; margin: auto;" />
 
 # Exploratory Data Analysis
 
@@ -542,7 +616,7 @@ corrplot(
 )
 ```
 
-<img src="man/figures/README-unnamed-chunk-26-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-28-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
 lab_data %>%
@@ -554,7 +628,7 @@ lab_data %>%
     )
 ```
 
-<img src="man/figures/README-unnamed-chunk-27-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-29-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
 p <- lab_data %>% 
@@ -573,7 +647,7 @@ p + facet_wrap(~ variable, scales = "free", ncol = 4) +
     )
 ```
 
-<img src="man/figures/README-unnamed-chunk-28-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-30-1.png" width="100%" style="display: block; margin: auto;" />
 
 Counting the number of zero values across all target variables:
 
@@ -611,7 +685,7 @@ lab_data %>%
   )
 ```
 
-<img src="man/figures/README-unnamed-chunk-31-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-33-1.png" width="100%" style="display: block; margin: auto;" />
 
 These zero values probably represent missing or invalid data rather than
 true biological zeros, and might be better handled through imputation or
@@ -625,7 +699,7 @@ lab_data %>%
   theme(strip.text = element_text(size = 10, color = "black", face = "bold"))
 ```
 
-<img src="man/figures/README-unnamed-chunk-32-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-34-1.png" width="100%" style="display: block; margin: auto;" />
 
 The color gradient shows the Mahalanobis distance, while the triangular
 shape indicates multivariate outliers, i.e. samples that are unusual
@@ -681,7 +755,7 @@ transf_list %>%
     )
 ```
 
-<img src="man/figures/README-unnamed-chunk-34-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-36-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
 transf_list %>%
@@ -692,7 +766,7 @@ transf_list %>%
   theme(strip.text = element_text(size = 10, color = "black", face = "bold"))
 ```
 
-<img src="man/figures/README-unnamed-chunk-35-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-37-1.png" width="100%" style="display: block; margin: auto;" />
 
 After the Box-Cox transformation, SCC now shows a more symmetric
 distribution around zero, rather than the extreme right skew we saw in
@@ -753,7 +827,7 @@ p2 <- eigenvalues %>%
 p1 | p2
 ```
 
-<img src="man/figures/README-unnamed-chunk-39-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-41-1.png" width="100%" style="display: block; margin: auto;" />
 
 The PCA extracted two principal components that collectively explained
 80.5% of the total variance in the dataset. The first principal
@@ -785,7 +859,7 @@ pca_contrib(pca_model, axes = 1, title = "Dim1", fill_color = "steelblue") |
   pca_contrib(pca_model, axes = 1:2, title = "Dim1 and Dim2", fill_color = "darkgreen")
 ```
 
-<img src="man/figures/README-unnamed-chunk-41-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-43-1.png" width="100%" style="display: block; margin: auto;" />
 
 Dim1 represents a milk composition axis, with relatively balanced
 contributions from multiple composition variables. The contribution
@@ -835,7 +909,7 @@ corr_circle(pca_model, title = "Correlation Circle of Variable Relationships") |
   corr_circle(pca_model, axes = c(2, 3))
 ```
 
-<img src="man/figures/README-unnamed-chunk-43-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-45-1.png" width="100%" style="display: block; margin: auto;" />
 
 The correlation circle and contribution analysis reveal a
 three-dimensional structure in the dataset:
@@ -881,7 +955,7 @@ biplot <- function(model, axes = c(1, 2), col.ind = NULL, legend.title = NULL) {
 ) + plot_layout(guides = "collect")
 ```
 
-<img src="man/figures/README-unnamed-chunk-45-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-47-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
 (biplot(pca_model, c(1, 3), lab_data$protein, "Protein\n(wt%)") |
@@ -889,7 +963,7 @@ biplot <- function(model, axes = c(1, 2), col.ind = NULL, legend.title = NULL) {
 ) + plot_layout(guides = "collect")
 ```
 
-<img src="man/figures/README-unnamed-chunk-46-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-48-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
 (biplot(pca_model, c(2, 3), lab_data$fat, "Fat\n(wt%)") |
@@ -897,7 +971,7 @@ biplot <- function(model, axes = c(1, 2), col.ind = NULL, legend.title = NULL) {
 ) + plot_layout(guides = "collect")
 ```
 
-<img src="man/figures/README-unnamed-chunk-47-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-49-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
 (biplot(pca_model, c(1, 3), lab_data$lactose, "Lactose\n(wt%)") |
@@ -905,7 +979,7 @@ biplot <- function(model, axes = c(1, 2), col.ind = NULL, legend.title = NULL) {
 ) + plot_layout(guides = "collect")
 ```
 
-<img src="man/figures/README-unnamed-chunk-48-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-50-1.png" width="100%" style="display: block; margin: auto;" />
 
 As previously observed, there’s a distinct point that’s completely
 isolated from the main data distribution. This observation indicated by
@@ -948,7 +1022,7 @@ modeling_data %>%
   theme_minimal()
 ```
 
-<img src="man/figures/README-unnamed-chunk-50-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-52-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
 pca_mod <- modeling_data %>%
@@ -1033,7 +1107,7 @@ wrap_plots(p1, p2, ncol = 1) +
   plot_layout(guides = "collect")
 ```
 
-<img src="man/figures/README-unnamed-chunk-56-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-58-1.png" width="100%" style="display: block; margin: auto;" />
 
 The sensor differences are primarily captured by Dim3 (5.96% variance),
 while Dim1 and Dim2 (which together explain 71.38% + 14.13% = ~85.4% of
@@ -1125,7 +1199,7 @@ wrap_plots(p1, p2, ncol = 1) +
   plot_layout(guides = "collect")
 ```
 
-<img src="man/figures/README-unnamed-chunk-61-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-63-1.png" width="100%" style="display: block; margin: auto;" />
 
 # Modeling
 

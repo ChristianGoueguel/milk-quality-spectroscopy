@@ -101,6 +101,8 @@ The dataset has evolved from initial CSV format to Parquet compression, with spe
 set.seed(123)
 ```
 
+## Data loading
+
 ```{r}
 dataset_path <- "Dataset/"
 functions_path <- "~/Documents/GitHub/milk-quality-spectroscopy/R/"
@@ -116,6 +118,8 @@ source(paste0(functions_path, "process_nir_data.R"))
 ```{r message=FALSE, warning=FALSE}
 nir_data <- process_nir_data(verbose = FALSE)
 ```
+
+## Sensor wavelengths
 
 ```{r}
 sensor_wavelengths_list <- nir_data$sensor_data %>%
@@ -145,6 +149,65 @@ sensor_wavelengths_list %>%
     )
   }, .id = "sensor")
 ```
+
+```{r}
+wavelength_tbl <- sensor_wavelengths_list %>%
+  map(as.numeric) %>%
+  map_dfr(~ tibble(wavelength = .x), .id = "sensor") %>%
+  group_by(sensor) %>%
+  mutate(channel = row_number()) %>%
+  ungroup() %>%
+  mutate(sensor_num = as.integer(str_extract(sensor, "\\d+")))
+
+median_by_channel <- wavelength_tbl %>%
+  group_by(channel) %>%
+  summarise(
+    channel_median = median(wavelength, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r}
+wavelength_tbl %>%
+  left_join(median_by_channel, by = "channel") %>%
+  mutate(deviation_from_median = abs(wavelength - channel_median)) %>%
+  ggplot() +
+  aes(
+    x = channel, 
+    y = factor(sensor_num, levels = 1:12), 
+    fill = deviation_from_median
+    ) +
+  geom_tile(color = "white", linewidth = 0.1) +
+  scale_fill_viridis_c(
+    name = "Deviation\n(nm)",
+    option = "plasma",
+    trans = "sqrt"
+  ) +
+  scale_x_continuous(
+    breaks = seq(0, 256, by = 32),
+    expand = c(0, 0)
+  ) +
+  scale_y_discrete(
+    labels = paste("Sensor", 12:1)
+  ) +
+  labs(
+    title = "Wavelength Deviation",
+    subtitle = "Each cell shows absolute deviation from the median wavelength at that channel",
+    x = "Wavelength Channel (1-256)",
+    y = ""
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "gray40"),
+    axis.text.x = element_text(size = 9),
+    axis.text.y = element_text(size = 9),
+    legend.position = "right"
+  )
+```
+
+## Sensor data
 
 ```{r}
 spec_data <- nir_data$corrected_spectra %>%
@@ -198,6 +261,8 @@ spec_data %>%
     )
 ```
 
+## Laboratory data
+
 ```{r}
 lab_data <- nir_data$lab_results %>%
   select(
@@ -244,6 +309,8 @@ lab_data %>% visdat::vis_miss()
 targets <- lab_data %>% select(fat, protein, scc, lactose) %>% names()
 meta <- lab_data %>% select(-sensor, -tube_number, -all_of(targets)) %>% names()
 ```
+
+## Cleaned data
 
 ```{r}
 modeling_data <- spec_data %>%
