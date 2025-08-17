@@ -34,8 +34,6 @@ knitr::opts_chunk$set(
 
 ```{r}
 suppressPackageStartupMessages({
-  library(HotellingEllipse)
-  library(ConfidenceEllipse)
   library(tidyverse)
   library(magrittr)
   library(reticulate)
@@ -81,7 +79,7 @@ The data is structured by sensor/stall with each sensor directory containing:
 
 **Lab Results**: Milk analysis including fat percentage, protein, somatic cell count and, lactose linked to specific cows and milking sessions.
 
-**Spectral Data**: Raw 16-bit spectral arrays captured during milking, with metadata like temperature, LED current, and integration time. Each spectrum is classified as "dark," "sample," or "empty."
+**Spectral Data**: Raw 16-bit spectral arrays captured during milking, with miscellaneous_vardata like temperature, LED current, and integration time. Each spectrum is classified as "dark," "sample," or "empty."
 
 **Sensor Info**: Each sensor has unique wavelength calibrations and measurement parameters that aren't standardized across sensors.
 
@@ -134,7 +132,7 @@ sensor_wavelengths_list <- nir_data$sensor_data %>%
 ```
 
 ```{r}
-sensor_wavelengths_list %>%
+wavelengths_summary <- sensor_wavelengths_list %>%
   map_dfr(~ {
     wl <- as.numeric(.x)
     steps <- abs(diff(wl))
@@ -148,6 +146,10 @@ sensor_wavelengths_list %>%
       total = length(wl)
     )
   }, .id = "sensor")
+```
+
+```{r}
+wavelengths_summary
 ```
 
 ```{r}
@@ -212,7 +214,7 @@ wavelength_tbl %>%
 ```{r}
 spec_data <- nir_data$corrected_spectra %>%
   filter(spec_type == "SAMPLE") %>%
-  select(tube_number, sensor, spec_array) %>%
+  select(datetime, tube_number, sensor, spec_array) %>%
   modify_at("tube_number", as_factor) %>%
   modify_at("sensor", as_factor) %>%
   mutate(
@@ -272,28 +274,20 @@ lab_data <- nir_data$lab_results %>%
     protein_percent,
     scc_thous_per_ml,
     lactose_percent,
-    milk_wt_lbs,
     other_solids_percent,
     solids_not_fat_percent,
     total_solids_percent
   ) %>%
   modify_at("tube_number", as_factor) %>%
   modify_at("sensor", as_factor) %>%
-  filter(
-    !is.na(fat_percent),
-    !is.na(protein_percent),
-    !is.na(scc_thous_per_ml),
-    !is.na(lactose_percent)
-  ) %>%
   rename(
     fat = fat_percent,
     protein = protein_percent,
     scc = scc_thous_per_ml,
     lactose = lactose_percent,
-    weight = milk_wt_lbs,
-    other_solids = other_solids_percent,
-    nonfat_solids = solids_not_fat_percent,
-    tot_solids = total_solids_percent
+    other = other_solids_percent,
+    nonfat = solids_not_fat_percent,
+    ts = total_solids_percent
   )
 ```
 
@@ -306,8 +300,8 @@ lab_data %>% visdat::vis_miss()
 ```
 
 ```{r}
-targets <- lab_data %>% select(fat, protein, scc, lactose) %>% names()
-meta <- lab_data %>% select(-sensor, -tube_number, -all_of(targets)) %>% names()
+target_var <- lab_data %>% select(fat, protein, scc, lactose) %>% names()
+miscellaneous_var <- lab_data %>% select(-sensor, -tube_number, -all_of(target_var)) %>% names()
 ```
 
 ## Cleaned data
@@ -317,8 +311,8 @@ modeling_data <- spec_data %>%
   left_join(lab_data, by = c("sensor", "tube_number")) %>%
   filter(if_all(starts_with("X_"), ~ !is.na(.x))) %>%
   relocate(sensor, .before = tube_number) %>%
-  relocate(all_of(targets), .after = tube_number) %>%
-  relocate(all_of(meta), .after = all_of(targets))
+  relocate(all_of(target_var), .after = tube_number) %>%
+  relocate(all_of(miscellaneous_var), .after = all_of(target_var))
 ```
 
 ```{r}
@@ -336,8 +330,6 @@ sensor_summary <- modeling_data %>%
     observations = n(),
     variables = ncol(.) - 2,
     total_cells = n() * ncol(.),
-    missing_values = sum(is.na(.)),
-    completeness = round((1 - sum(is.na(.)) / (n() * ncol(.))) * 100, 1),
     .groups = "drop"
   ) %>%
   arrange(sensor)
@@ -515,17 +507,17 @@ sequence_plot <- measurement_data %>%
 ```
 
 ```{r}
-print(sequence_plot)
+sequence_plot
 ```
 
 # Exploratory Data Analysis
 
 ## Descriptive statistics for milk quality target variables
 
-```{r}
+```{r message=FALSE, warning=FALSE}
 lab_data %>% 
-  select(all_of(targets)) %>%
-  specProc::summaryStats()
+  select(all_of(target_var)) %>%
+  specProc::summaryStats(robust = TRUE)
 ```
 
 ```{r}
@@ -559,7 +551,7 @@ lab_data %>%
 
 ```{r message=FALSE, warning=FALSE, fig.align='center'}
 p <- lab_data %>% 
-  select(all_of(targets)) %>%
+  select(all_of(target_var)) %>%
   specProc::adjusted_boxplot()
 
 p + facet_wrap(~ variable, scales = "free", ncol = 4) +
@@ -578,13 +570,13 @@ Counting the number of zero values across all target variables:
 
 ```{r}
 lab_data %>%
-  select(all_of(targets)) %>%
+  select(all_of(target_var)) %>%
   summarise(across(everything(), ~ sum(.x == 0, na.rm = TRUE)))
 ```
 
 ```{r}
 zero_pct <- lab_data %>%
-  select(all_of(targets)) %>%
+  select(all_of(target_var)) %>%
   summarise(across(everything(), ~ mean(.x == 0, na.rm = TRUE))) %>%
   summarise(overall_zero_pct = mean(c_across(everything())))
 
@@ -593,7 +585,7 @@ nonzero_pct <- 1 - zero_pct$overall_zero_pct
 
 ```{r message=FALSE, warning=FALSE, fig.align='center'}
 lab_data %>%
-  select(all_of(targets)) %>%
+  select(all_of(target_var)) %>%
   mutate(across(everything(), ~ ifelse(.x == 0, NA, .x))) %>%
   naniar::vis_miss() +
   scale_fill_manual(
@@ -610,13 +602,13 @@ These zero values probably represent missing or invalid data rather than true bi
 
 ```{r message=FALSE, warning=FALSE}
 lab_data %>% 
-  select(all_of(targets)) %>%
+  select(all_of(target_var)) %>%
   # filter(if_all(everything(), ~ .x > 0)) %>% 
   specProc::outlierplot(show.mahal = TRUE) +
   theme(strip.text = element_text(size = 10, color = "black", face = "bold"))
 ```
 
-The color gradient shows the Mahalanobis distance, while the triangular shape indicates multivariate outliers, i.e. samples that are unusual when considering all targets together. Most variables show tight clustering. Fat, lactose, other_solids, and protein all show the majority of data points clustered tightly around zero with relatively few outliers. SCC shows much more variability, showing a broader spread of Mahalanobis distances.
+The color gradient shows the Mahalanobis distance, while the triangular shape indicates multivariate outliers, i.e. samples that are unusual when considering all target_var together. Most variables show tight clustering. Fat, lactose, other_solids, and protein all show the majority of data points clustered tightly around zero with relatively few outliers. SCC shows much more variability, showing a broader spread of Mahalanobis distances.
 
 The yellow triangles in the fat, lactose, other_solids, and protein panels, represent extreme outliers with very high Mahalanobis distances. They have unusually low fat, lactose, other solids, and protein content compared to the normal population. Moreover, the fact that fat, protein, and lactose all have exactly 11 zeros suggests these might be the same samples with missing or problematic measurements. The 11 samples with zeros across multiple variables would definitely appear as extreme multivariate outliers (explaining some of those yellow triangular points at very negative values).
 
@@ -624,7 +616,7 @@ SCC has a highly skewed distribution based on its box plot. This extreme right s
 
 ```{r}
 transf_list <- lab_data %>%
-  select(all_of(targets)) %>%
+  select(all_of(target_var)) %>%
   specProc::robustBCYJ(var = c("scc", "lactose"))
 ```
 
@@ -659,13 +651,13 @@ After the Box-Cox transformation, SCC now shows a more symmetric distribution ar
 
 ## PCA analysis
 
-### Milk quality targets
+### Milk quality target_var
 
 A principal component analysis (PCA) was conducted on the four key milk composition variables. The analysis aimed to understand the underlying structure of relationships between these variables and assess potential multicollinearity for subsequent modeling efforts.
 
 ```{r}
 pca_model <- lab_data %>%
-  select(all_of(targets), other_solids) %>%
+  select(all_of(target_var), other) %>%
   PCA(scale.unit = TRUE, graph = FALSE)
 ```
 
@@ -775,6 +767,33 @@ The correlation circle and contribution analysis reveal a three-dimensional stru
 -   **Health-Production Trade-off Dimension (Dim2):** The negative correlation between milk weight and somatic cell count along Dim2-axis reveals that higher milk production is associated with lower SCC, while lower production coincides with higher SCC (potentially indicating health issues affecting yield).
 
 ```{r}
+t2 <- pca_model$ind$coord[, 1:3] %>%
+  HotellingEllipse::ellipseParam(k = 3) %>%
+  pluck("Tsquare")
+```
+
+```{r fig.align='center', fig.height=6, fig.width=10}
+plot3D::scatter3D(
+  x = pca_model$ind$coord[, 1],
+  y = pca_model$ind$coord[, 2],
+  z = pca_model$ind$coord[, 3],
+  theta = 50,
+  phi = 20,
+  bty = "g",
+  pch = 20,
+  cex = 1.5,
+  ticktype = "detailed",
+  colvar = t2$value,
+  clim = range(t2$value),
+  xlab = "Dim.1",
+  ylab = "Dim.2",
+  zlab = "Dim.3",
+  main = "3D PCA Score Plot",
+  clab = "Hotelling’s T²"
+)
+```
+
+```{r}
 biplot <- function(model, axes = c(1, 2), col.ind = NULL, legend.title = NULL) {
   p <- model %>%
     fviz_pca_biplot(
@@ -860,12 +879,14 @@ pca_mod <- modeling_data %>%
 pca_scores <- pca_mod %>%
   pluck("ind", "coord") %>%
   as_tibble() %>%
-  bind_cols(modeling_data %>% select(sensor, all_of(targets)), .) %>%
+  bind_cols(modeling_data %>% select(sensor, all_of(target_var)), .) %>%
   print()
 ```
 
 ```{r}
-ellipse1 <- pca_scores %>% select(starts_with("Dim")) %>% ellipseCoord(pcx = 1, pcy = 2)
+ellipse1 <- pca_scores %>%
+  select(starts_with("Dim")) %>%
+  HotellingEllipse::ellipseCoord(pcx = 1, pcy = 2)
 ```
 
 ```{r}
@@ -932,12 +953,17 @@ pca_sensor1 <- modeling_data %>%
 scores_sensor1 <- pca_sensor1 %>%
   pluck("ind", "coord") %>%
   as_tibble() %>%
-  bind_cols(modeling_data %>% filter(sensor == "sensor_1") %>% select(sensor, all_of(targets)), .) %>%
+  bind_cols(modeling_data %>% filter(sensor == "sensor_1") %>% select(sensor, all_of(target_var)), .) %>%
   print()
 ```
 
 ```{r}
-ellipse1 <- scores_sensor1 %>% select(starts_with("Dim")) %>% ellipseCoord(pcx = 1, pcy = 2)
+ellipse1 <- scores_sensor1 %>%
+  select(starts_with("Dim")) %>%
+  HotellingEllipse::ellipseCoord(pcx = 1, pcy = 2)
+```
+
+```{r}
 t1 <- round(as.numeric(pca_sensor1$eig[1,2]), 2)
 t2 <- round(as.numeric(pca_sensor1$eig[2,2]), 2)
 t3 <- round(as.numeric(pca_sensor1$eig[3,2]), 2)
@@ -1283,7 +1309,7 @@ feature_importance <- function(model_results, target_variable, top_n = 15) {
 ```{r}
 run_milk_quality_prediction <- function(
     data, 
-    targets = c("fat_percent", "protein_percent", "scc_thous_per_ml", "lactose_percent")
+    target_var = c("fat_percent", "protein_percent", "scc_thous_per_ml", "lactose_percent")
     ) {
   
   cat("=== NIRS Milk Quality Prediction Analysis ===\n")
@@ -1292,7 +1318,7 @@ run_milk_quality_prediction <- function(
   all_results <- list()
   all_performance <- list()
   
-  for (target in targets) {
+  for (target in target_var) {
     cat(sprintf("\n\n### PROCESSING TARGET: %s ###\n", target))
     
     workflow_data <- models_workflow(modeling_data, target)
