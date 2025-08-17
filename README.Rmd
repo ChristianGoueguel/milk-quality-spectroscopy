@@ -179,7 +179,7 @@ wavelength_tbl %>%
     y = factor(sensor_num, levels = 1:12), 
     fill = deviation_from_median
     ) +
-  geom_tile(color = "white", linewidth = 0.1) +
+  geom_raster() +
   scale_fill_viridis_c(
     name = "Deviation\n(nm)",
     option = "plasma",
