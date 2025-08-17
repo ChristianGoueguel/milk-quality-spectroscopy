@@ -130,7 +130,20 @@ sensor_wavelengths_list <- nir_data$sensor_data %>%
 ```
 
 ```{r}
-sensor_wavelengths_list %>% glimpse()
+sensor_wavelengths_list %>%
+  map_dfr(~ {
+    wl <- as.numeric(.x)
+    steps <- abs(diff(wl))
+    tibble(
+      min = min(wl),
+      max = max(wl),
+      range = max(wl) - min(wl),
+      mean_step = mean(steps),
+      min_step = min(steps),
+      max_step = max(steps),
+      total = length(wl)
+    )
+  }, .id = "sensor")
 ```
 
 ```{r}
@@ -495,6 +508,12 @@ p + facet_wrap(~ variable, scales = "free", ncol = 4) +
 ```
 
 Counting the number of zero values across all target variables:
+
+```{r}
+lab_data %>%
+  select(all_of(targets)) %>%
+  summarise(across(everything(), ~ sum(.x == 0, na.rm = TRUE)))
+```
 
 ```{r}
 zero_pct <- lab_data %>%
