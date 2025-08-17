@@ -850,31 +850,138 @@ As previously observed, there's a distinct point that's completely isolated from
 
 ### NIRS spectra
 
+#### Measurement Quality Assessment
+
 ```{r}
-wavelengths_sorted <- sort(as.numeric(sensor_wavelengths_list$sensor_1))
+drift_tbl <- modeling_data %>%
+  group_by(tube_number) %>%
+  arrange(datetime) %>%
+  mutate(
+    measurement_order = row_number(),
+    across(X1:X256, ~ abs(.x - median(.x)), .names = "dev_{.col}")
+  ) %>%
+  rowwise() %>%
+  mutate(
+    total_spectral_deviation = mean(c_across(starts_with("dev_")), na.rm = TRUE)
+  )
+```
+
+```{r message=FALSE, warning=FALSE, fig.align='center'}
+drift_tbl %>%
+  ggplot(aes(x = measurement_order, y = total_spectral_deviation)) +
+  geom_point(alpha = 1 / 10) +
+  geom_smooth() +
+  facet_wrap(
+    ~sensor,
+    labeller = labeller(sensor = function(x) str_replace(x, "_", " "))
+  ) +
+  labs(
+    title = "Spectral Measurement Consistency Over Time",
+    x = "Measurement Order",
+    y = "Average Spectral Deviation from Tube Median"
+  )
+```
+
+#### Spectral Noise
+
+```{r}
+measurement_precision <- modeling_data %>%
+  group_by(tube_number) %>%
+  summarise(
+    across(X1:X256, ~ sd(.x, na.rm = TRUE), .names = "sd{.col}"),
+    fat = first(fat),
+    n_measurements = n(),
+    .groups = "drop"
+  )
 ```
 
 ```{r}
-modeling_data %>%
-  filter(sensor == "sensor_1") %>%
-  select(tube_number, fat, starts_with("X")) %>%
-  slice_sample(n = 30) %>%  # Only take 5 samples
-  setNames(c("tube_number", "fat", wavelengths_sorted)) %>%
+noise_tbl <- measurement_precision %>%
+  select(tube_number, fat, starts_with("sd")) %>%
   pivot_longer(
-    cols = !c(fat, tube_number),
-    names_to = "Wavelength",
-    values_to = "Intensity"
+    cols = starts_with("sd"), 
+    names_to = "wavelength", 
+    values_to = "noise"
+    ) %>%
+  mutate(
+    wavelength_num = as.numeric(str_extract(wavelength, "\\d+")),
+    wavelength_nm = 850 + (wavelength_num - 1) * 4
   ) %>%
-  mutate(Wavelength = as.numeric(Wavelength)) %>%
-  ggplot(aes(x = Wavelength, y = Intensity, group = tube_number, color = fat)) +
-  geom_line(alpha = 0.7) +
-  scale_color_viridis_c(name = "Fat Content", option = "plasma") +
+  arrange(fat) %>%
+  mutate(tube_number = factor(tube_number, levels = unique(tube_number)))
+```
+
+```{r}
+avg_noise_tbl <- noise_tbl %>%
+  group_by(wavelength_nm) %>%
+  summarise(
+    mean_noise = mean(noise, na.rm = TRUE),
+    sd_noise = sd(noise, na.rm = TRUE),
+    min_noise = min(noise, na.rm = TRUE),
+    max_noise = max(noise, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r}
+p3 <- noise_tbl %>%
+  ggplot() +
+  aes(x = wavelength_nm, y = tube_number, fill = noise) +
+  geom_tile() +
+  scale_fill_viridis_c(name = "Noise", option = "plasma") +
   labs(
-    title = "NIRS Spectra by Fat Content",
+    title = "Spectral Noise Across Tubes and Wavelengths",
+    subtitle = "Tubes ordered by fat content (low to high)",
     x = "Wavelength (nm)",
-    y = "Intensity"
+    y = "Tube Number"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    panel.grid = element_blank()
+  )
+```
+
+```{r}
+p4 <- avg_noise_tbl %>%
+  ggplot(aes(x = wavelength_nm, y = 1, fill = mean_noise)) +
+  geom_tile(height = 0.5) +
+  scale_fill_viridis_c(name = "Mean\nNoise", option = "plasma") +
+  labs(
+    title = "",
+    x = "Wavelength (nm)",
+    y = ""
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    panel.grid.major.y = element_blank()
+  )
+```
+
+```{r}
+p5 <- avg_noise_tbl %>%
+  ggplot() +
+  aes(x = wavelength_nm, y = mean_noise) +
+  geom_ribbon(
+    aes(ymin = mean_noise - sd_noise, ymax = mean_noise + sd_noise),
+    alpha = 0.3,
+    fill = "blue"
+  ) +
+  geom_line(color = "blue", size = 1) +
+  labs(
+    title = "Average Spectral Noise Across All Tubes",
+    subtitle = "Ribbon shows ± 1 standard deviation",
+    x = "Wavelength (nm)",
+    y = "Average Noise"
   ) +
   theme_minimal()
+```
+
+```{r fig.align='center', fig.height=7, fig.width=10}
+(p3 | p4) / p5
 ```
 
 ```{r}
