@@ -515,9 +515,13 @@ sequence_plot
 ## Descriptive statistics for milk quality target variables
 
 ```{r message=FALSE, warning=FALSE}
-lab_data %>% 
+stat_summary <- lab_data %>% 
   select(all_of(target_var)) %>%
   specProc::summaryStats(robust = TRUE)
+```
+
+```{r}
+stat_summary
 ```
 
 ```{r}
@@ -569,9 +573,13 @@ p + facet_wrap(~ variable, scales = "free", ncol = 4) +
 Counting the number of zero values across all target variables:
 
 ```{r}
-lab_data %>%
+zeros_tbl <- lab_data %>%
   select(all_of(target_var)) %>%
   summarise(across(everything(), ~ sum(.x == 0, na.rm = TRUE)))
+```
+
+```{r}
+zeros_tbl
 ```
 
 ```{r}
@@ -788,8 +796,8 @@ plot3D::scatter3D(
   xlab = "Dim.1",
   ylab = "Dim.2",
   zlab = "Dim.3",
-  main = "3D PCA Score Plot",
-  clab = "Hotelling’s T²"
+  main = "3D PCA Score Plot of Milk Composition",
+  clab = "Hotelling’s T²\nStatistics"
 )
 ```
 

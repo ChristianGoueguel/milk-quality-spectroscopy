@@ -576,9 +576,13 @@ sequence_plot
 ## Descriptive statistics for milk quality target variables
 
 ``` r
-lab_data %>% 
+stat_summary <- lab_data %>% 
   select(all_of(target_var)) %>%
   specProc::summaryStats(robust = TRUE)
+```
+
+``` r
+stat_summary
 #> # A tibble: 4 × 14
 #>   variable median   mad    Qn    Sn medcouple   LMC   RMC    rsd biloc biscale
 #>   <chr>     <dbl> <dbl> <dbl> <dbl>     <dbl> <dbl> <dbl>  <dbl> <dbl>   <dbl>
@@ -608,7 +612,7 @@ corrplot(
 )
 ```
 
-<img src="man/figures/README-unnamed-chunk-29-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-30-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
 lab_data %>%
@@ -620,7 +624,7 @@ lab_data %>%
     )
 ```
 
-<img src="man/figures/README-unnamed-chunk-30-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-31-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
 p <- lab_data %>% 
@@ -639,14 +643,18 @@ p + facet_wrap(~ variable, scales = "free", ncol = 4) +
     )
 ```
 
-<img src="man/figures/README-unnamed-chunk-31-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-32-1.png" width="100%" style="display: block; margin: auto;" />
 
 Counting the number of zero values across all target variables:
 
 ``` r
-lab_data %>%
+zeros_tbl <- lab_data %>%
   select(all_of(target_var)) %>%
   summarise(across(everything(), ~ sum(.x == 0, na.rm = TRUE)))
+```
+
+``` r
+zeros_tbl
 #> # A tibble: 1 × 4
 #>     fat protein   scc lactose
 #>   <int>   <int> <int>   <int>
@@ -677,7 +685,7 @@ lab_data %>%
   )
 ```
 
-<img src="man/figures/README-unnamed-chunk-34-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-36-1.png" width="100%" style="display: block; margin: auto;" />
 
 These zero values probably represent missing or invalid data rather than
 true biological zeros, and might be better handled through imputation or
@@ -691,7 +699,7 @@ lab_data %>%
   theme(strip.text = element_text(size = 10, color = "black", face = "bold"))
 ```
 
-<img src="man/figures/README-unnamed-chunk-35-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-37-1.png" width="100%" style="display: block; margin: auto;" />
 
 The color gradient shows the Mahalanobis distance, while the triangular
 shape indicates multivariate outliers, i.e. samples that are unusual
@@ -747,7 +755,7 @@ transf_list %>%
     )
 ```
 
-<img src="man/figures/README-unnamed-chunk-37-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-39-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
 transf_list %>%
@@ -758,7 +766,7 @@ transf_list %>%
   theme(strip.text = element_text(size = 10, color = "black", face = "bold"))
 ```
 
-<img src="man/figures/README-unnamed-chunk-38-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-40-1.png" width="100%" style="display: block; margin: auto;" />
 
 After the Box-Cox transformation, SCC now shows a more symmetric
 distribution around zero, rather than the extreme right skew we saw in
@@ -819,7 +827,7 @@ p2 <- eigenvalues %>%
 p1 | p2
 ```
 
-<img src="man/figures/README-unnamed-chunk-42-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-44-1.png" width="100%" style="display: block; margin: auto;" />
 
 The PCA extracted two principal components that collectively explained
 80.5% of the total variance in the dataset. The first principal
@@ -851,7 +859,7 @@ pca_contrib(pca_model, axes = 1, title = "Dim1", fill_color = "steelblue") |
   pca_contrib(pca_model, axes = 1:2, title = "Dim1 and Dim2", fill_color = "darkgreen")
 ```
 
-<img src="man/figures/README-unnamed-chunk-44-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-46-1.png" width="100%" style="display: block; margin: auto;" />
 
 Dim1 represents a milk composition axis, with relatively balanced
 contributions from multiple composition variables. The contribution
@@ -901,7 +909,7 @@ corr_circle(pca_model, title = "Correlation Circle of Variable Relationships") |
   corr_circle(pca_model, axes = c(2, 3))
 ```
 
-<img src="man/figures/README-unnamed-chunk-46-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-48-1.png" width="100%" style="display: block; margin: auto;" />
 
 The correlation circle and contribution analysis reveal a
 three-dimensional structure in the dataset:
@@ -942,12 +950,12 @@ plot3D::scatter3D(
   xlab = "Dim.1",
   ylab = "Dim.2",
   zlab = "Dim.3",
-  main = "3D PCA Score Plot",
-  clab = "Hotelling’s T²"
+  main = "3D PCA Score Plot of Milk Composition",
+  clab = "Hotelling’s T²\nStatistics"
 )
 ```
 
-<img src="man/figures/README-unnamed-chunk-48-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-50-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
 biplot <- function(model, axes = c(1, 2), col.ind = NULL, legend.title = NULL) {
@@ -976,7 +984,7 @@ biplot <- function(model, axes = c(1, 2), col.ind = NULL, legend.title = NULL) {
 ) + plot_layout(guides = "collect")
 ```
 
-<img src="man/figures/README-unnamed-chunk-50-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-52-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
 (biplot(pca_model, c(1, 3), lab_data$protein, "Protein\n(wt%)") |
@@ -984,7 +992,7 @@ biplot <- function(model, axes = c(1, 2), col.ind = NULL, legend.title = NULL) {
 ) + plot_layout(guides = "collect")
 ```
 
-<img src="man/figures/README-unnamed-chunk-51-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-53-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
 (biplot(pca_model, c(2, 3), lab_data$fat, "Fat\n(wt%)") |
@@ -992,7 +1000,7 @@ biplot <- function(model, axes = c(1, 2), col.ind = NULL, legend.title = NULL) {
 ) + plot_layout(guides = "collect")
 ```
 
-<img src="man/figures/README-unnamed-chunk-52-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-54-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
 (biplot(pca_model, c(1, 3), lab_data$lactose, "Lactose\n(wt%)") |
@@ -1000,7 +1008,7 @@ biplot <- function(model, axes = c(1, 2), col.ind = NULL, legend.title = NULL) {
 ) + plot_layout(guides = "collect")
 ```
 
-<img src="man/figures/README-unnamed-chunk-53-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-55-1.png" width="100%" style="display: block; margin: auto;" />
 
 As previously observed, there’s a distinct point that’s completely
 isolated from the main data distribution. This observation indicated by
@@ -1043,7 +1051,7 @@ modeling_data %>%
   theme_minimal()
 ```
 
-<img src="man/figures/README-unnamed-chunk-55-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-57-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
 pca_mod <- modeling_data %>%
@@ -1130,7 +1138,7 @@ wrap_plots(p1, p2, ncol = 1) +
   plot_layout(guides = "collect")
 ```
 
-<img src="man/figures/README-unnamed-chunk-61-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-63-1.png" width="100%" style="display: block; margin: auto;" />
 
 The sensor differences are primarily captured by Dim3 (5.96% variance),
 while Dim1 and Dim2 (which together explain 71.38% + 14.13% = ~85.4% of
@@ -1227,7 +1235,7 @@ wrap_plots(p1, p2, ncol = 1) +
   plot_layout(guides = "collect")
 ```
 
-<img src="man/figures/README-unnamed-chunk-67-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-69-1.png" width="100%" style="display: block; margin: auto;" />
 
 # Modeling
 
