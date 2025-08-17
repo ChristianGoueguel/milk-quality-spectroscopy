@@ -54,7 +54,6 @@ suppressPackageStartupMessages({
   library(gridExtra)
   library(RColorBrewer)
   library(knitr)
-  library(naniar)
   library(janitor)
   library(ggforce)
   library(ranger)
@@ -176,7 +175,14 @@ spec_data <- nir_data$corrected_spectra %>%
 ```
 
 ```{r}
-spec_data
+spec_data %>%
+  select(starts_with("X")) %>%
+  visdat::vis_miss(warn_large_data = FALSE, large_data_size = 1e6) +
+  labs(x = "Wavelenght (nm)") +
+  theme(
+    axis.ticks.x = element_blank(), 
+    axis.text.x = element_blank()
+    )
 ```
 
 ```{r}
@@ -214,7 +220,11 @@ lab_data <- nir_data$lab_results %>%
 ```
 
 ```{r}
-lab_data
+lab_data %>% visdat::vis_dat()
+```
+
+```{r}
+lab_data %>% visdat::vis_miss()
 ```
 
 ```{r}
@@ -428,43 +438,6 @@ sequence_plot <- measurement_data %>%
 print(sequence_plot)
 ```
 
-## NIR Spectra
-
-```{r}
-source(paste0(functions_path, "visualize_nirs_time_series.R"))
-```
-
-```{r message=FALSE, warning=FALSE}
-visualize_nirs_time_series(nir_data, "sensor_1", min_measurements = 2, seed = 100)
-```
-
-```{r}
-wavelengths_sorted <- sort(as.numeric(sensor_wavelengths_list$sensor_1))
-```
-
-```{r}
-modeling_data %>%
-  filter(sensor == "sensor_1") %>%
-  select(tube_number, fat, starts_with("X")) %>%
-  slice_sample(n = 30) %>%  # Only take 5 samples
-  setNames(c("tube_number", "fat", wavelengths_sorted)) %>%
-  pivot_longer(
-    cols = !c(fat, tube_number),
-    names_to = "Wavelength",
-    values_to = "Intensity"
-  ) %>%
-  mutate(Wavelength = as.numeric(Wavelength)) %>%
-  ggplot(aes(x = Wavelength, y = Intensity, group = tube_number, color = fat)) +
-  geom_line(alpha = 0.7) +
-  scale_color_viridis_c(name = "Fat Content", option = "plasma") +
-  labs(
-    title = "NIRS Spectra by Fat Content",
-    x = "Wavelength (nm)",
-    y = "Intensity"
-  ) +
-  theme_minimal()
-```
-
 # Exploratory Data Analysis
 
 ## Descriptive statistics for milk quality target variables
@@ -504,7 +477,7 @@ lab_data %>%
     )
 ```
 
-```{r message=FALSE, warning=FALSE}
+```{r message=FALSE, warning=FALSE, fig.align='center'}
 p <- lab_data %>% 
   select(all_of(targets)) %>%
   specProc::adjusted_boxplot()
@@ -524,9 +497,27 @@ p + facet_wrap(~ variable, scales = "free", ncol = 4) +
 Counting the number of zero values across all target variables:
 
 ```{r}
-lab_data %>% 
+zero_pct <- lab_data %>%
   select(all_of(targets)) %>%
-  summarise(across(everything(), ~ sum(.x == 0, na.rm = TRUE)))
+  summarise(across(everything(), ~ mean(.x == 0, na.rm = TRUE))) %>%
+  summarise(overall_zero_pct = mean(c_across(everything())))
+
+nonzero_pct <- 1 - zero_pct$overall_zero_pct
+```
+
+```{r message=FALSE, warning=FALSE, fig.align='center'}
+lab_data %>%
+  select(all_of(targets)) %>%
+  mutate(across(everything(), ~ ifelse(.x == 0, NA, .x))) %>%
+  naniar::vis_miss() +
+  scale_fill_manual(
+    values = c("lightblue", "darkred"),
+    labels = c(
+      paste0("nonzeros (", round(nonzero_pct * 100, 1), "%)"),
+      paste0("zeros (", round(zero_pct$overall_zero_pct * 100, 1), "%)")
+    ),
+    name = ""
+  )
 ```
 
 These zero values probably represent missing or invalid data rather than true biological zeros, and might be better handled through imputation or exclusion rather than including them in the modeling.
@@ -580,7 +571,9 @@ transf_list %>%
 
 After the Box-Cox transformation, SCC now shows a more symmetric distribution around zero, rather than the extreme right skew we saw in the original data. The transformation has successfully normalized the SCC distribution. The dark points (high Mahalanobis distance outliers) appear across all panels, suggesting these represent samples with genuinely unusual multivariate patterns rather than just extreme values driven by SCC's original skewed distribution.
 
-## PCA analysis of milk quality targets
+## PCA analysis
+
+### Milk quality targets
 
 A principal component analysis (PCA) was conducted on the four key milk composition variables. The analysis aimed to understand the underlying structure of relationships between these variables and assess potential multicollinearity for subsequent modeling efforts.
 
@@ -622,7 +615,7 @@ p2 <- eigenvalues %>%
   theme_light()
 ```
 
-```{r}
+```{r fig.align='center'}
 p1 | p2
 ```
 
@@ -647,7 +640,7 @@ pca_contrib <- function(model, axes, title, fill_color, top = 10) {
 }
 ```
 
-```{r}
+```{r fig.align='center'}
 pca_contrib(pca_model, axes = 1, title = "Dim1", fill_color = "steelblue") |
   pca_contrib(pca_model, axes = 2, title = "Dim2", fill_color = "coral") |
   pca_contrib(pca_model, axes = 1:2, title = "Dim1 and Dim2", fill_color = "darkgreen")
@@ -684,7 +677,7 @@ corr_circle <- function(
 }
 ```
 
-```{r fig.height=4, fig.width=10}
+```{r fig.height=4, fig.width=10, fig.align='center'}
 corr_circle(pca_model, title = "Correlation Circle of Variable Relationships") |
   corr_circle(pca_model, axes = c(2, 3))
 ```
@@ -716,31 +709,60 @@ biplot <- function(model, axes = c(1, 2), col.ind = NULL, legend.title = NULL) {
 }
 ```
 
-```{r}
+```{r, fig.align='center'}
 (biplot(pca_model, c(1, 2), lab_data$scc, "SCC\n(10³ cells/mL)") |
   biplot(pca_model, c(2, 3), lab_data$scc, "SCC\n(10³ cells/mL)")
 ) + plot_layout(guides = "collect")
 ```
 
-```{r}
+```{r, fig.align='center'}
 (biplot(pca_model, c(1, 3), lab_data$protein, "Protein\n(wt%)") |
   biplot(pca_model, c(3, 4), lab_data$protein, "Protein\n(wt%)")
 ) + plot_layout(guides = "collect")
 ```
 
-```{r}
+```{r, fig.align='center'}
 (biplot(pca_model, c(2, 3), lab_data$fat, "Fat\n(wt%)") |
   biplot(pca_model, c(3, 4), lab_data$fat, "Fat\n(wt%)")
 ) + plot_layout(guides = "collect")
 ```
 
-```{r}
+```{r, fig.align='center'}
 (biplot(pca_model, c(1, 3), lab_data$lactose, "Lactose\n(wt%)") |
   biplot(pca_model, c(2, 4), lab_data$lactose, "Lactose\n(wt%)")
 ) + plot_layout(guides = "collect")
 ```
 
 As previously observed, there's a distinct point that's completely isolated from the main data distribution. This observation indicated by the teal coloring occupies an extreme position in the principal component space, far removed from all other samples. The positioning of these observations as extreme outliers in the PCA space provides compelling evidence that they do not represent genuine biological variation in milk composition. Since principal components are constructed as linear combinations of all input variables, samples containing multiple zero values become mathematically projected to peripheral regions of the PC subspace, where they exert disproportionate influence on the overall data structure.
+
+### NIRS spectra
+
+```{r}
+wavelengths_sorted <- sort(as.numeric(sensor_wavelengths_list$sensor_1))
+```
+
+```{r}
+modeling_data %>%
+  filter(sensor == "sensor_1") %>%
+  select(tube_number, fat, starts_with("X")) %>%
+  slice_sample(n = 30) %>%  # Only take 5 samples
+  setNames(c("tube_number", "fat", wavelengths_sorted)) %>%
+  pivot_longer(
+    cols = !c(fat, tube_number),
+    names_to = "Wavelength",
+    values_to = "Intensity"
+  ) %>%
+  mutate(Wavelength = as.numeric(Wavelength)) %>%
+  ggplot(aes(x = Wavelength, y = Intensity, group = tube_number, color = fat)) +
+  geom_line(alpha = 0.7) +
+  scale_color_viridis_c(name = "Fat Content", option = "plasma") +
+  labs(
+    title = "NIRS Spectra by Fat Content",
+    x = "Wavelength (nm)",
+    y = "Intensity"
+  ) +
+  theme_minimal()
+```
 
 ```{r}
 pca_mod <- modeling_data %>%
