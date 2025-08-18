@@ -14,14 +14,14 @@
   - [Measurements by Sensor and Tube](#measurements-by-sensor-and-tube)
   - [Measurements timeline](#measurements-timeline)
 - [Exploratory Data Analysis](#exploratory-data-analysis)
-  - [Descriptive statistics for milk quality target
-    variables](#descriptive-statistics-for-milk-quality-target-variables)
-  - [PCA analysis](#pca-analysis)
-    - [Milk quality components](#milk-quality-components)
-    - [NIRS spectra](#nirs-spectra)
-      - [Measurement Quality
-        Assessment](#measurement-quality-assessment)
-      - [Spectral Noise](#spectral-noise)
+  - [Descriptive statistics](#descriptive-statistics)
+  - [Milk quality components](#milk-quality-components)
+    - [PCA analysis](#pca-analysis)
+  - [NIRS spectra](#nirs-spectra)
+    - [Measurement Quality Assessment](#measurement-quality-assessment)
+    - [Spectral Noise](#spectral-noise)
+    - [Averaged Spectra](#averaged-spectra)
+    - [PCA analysis](#pca-analysis-1)
 - [Modeling](#modeling)
   - [Data splits and preprocessing](#data-splits-and-preprocessing)
   - [Models tuning and evaluation](#models-tuning-and-evaluation)
@@ -126,6 +126,7 @@ source(paste0(functions_path, "read_sensor_csvs.R"))
 source(paste0(functions_path, "read_sensor_parquets.R"))
 source(paste0(functions_path, "subtract_dark_spectrum.R"))
 source(paste0(functions_path, "process_raw_data.R"))
+source(paste0(functions_path, "derivative.R"))
 ```
 
 ``` r
@@ -627,7 +628,7 @@ sequence_plot
 
 # Exploratory Data Analysis
 
-## Descriptive statistics for milk quality target variables
+## Descriptive statistics
 
 ``` r
 stat_summary <- lab_dataset %>% 
@@ -829,9 +830,9 @@ appear across all panels, suggesting these represent samples with
 genuinely unusual multivariate patterns rather than just extreme values
 driven by SCC’s original skewed distribution.
 
-## PCA analysis
+## Milk quality components
 
-### Milk quality components
+### PCA analysis
 
 A principal component analysis (PCA) was conducted on the four key milk
 composition variables. The analysis aimed to understand the underlying
@@ -1075,9 +1076,9 @@ containing multiple zero values become mathematically projected to
 peripheral regions of the PC subspace, where they exert disproportionate
 influence on the overall data structure.
 
-### NIRS spectra
+## NIRS spectra
 
-#### Measurement Quality Assessment
+### Measurement Quality Assessment
 
 ``` r
 drift_tbl <- cleaned_data %>%
@@ -1112,7 +1113,7 @@ drift_tbl %>%
 
 <img src="man/figures/README-unnamed-chunk-62-1.png" width="100%" style="display: block; margin: auto;" />
 
-#### Spectral Noise
+### Spectral Noise
 
 ``` r
 measurement_precision <- cleaned_data %>%
@@ -1236,8 +1237,205 @@ p5 <- avg_noise_tbl %>%
 
 <img src="man/figures/README-unnamed-chunk-70-1.png" width="100%" style="display: block; margin: auto;" />
 
+### Averaged Spectra
+
 ``` r
-pca_mod <- cleaned_data %>%
+avg_spec <- cleaned_data %>%
+  select(-datetime) %>%
+  filter(
+    fat > 0,
+    protein > 0, 
+    scc > 0,
+    lactose > 0
+  ) %>%
+  group_by(sensor, tube_number) %>%
+  summarise(
+    across(c(fat, protein, scc, lactose, other, nonfat, ts), first),
+    across(X1:X256, \(x) median(x, na.rm = TRUE)),
+    .groups = "drop"
+  )
+```
+
+``` r
+spec_by_target <- function(data, component, trans = NULL) {
+  tbl <- data %>%
+    filter(!!sym(component) > 0) %>% 
+    arrange(!!sym(component)) %>%
+    mutate(
+      component_rank = rank(!!sym(component)),
+      component_percentile = component_rank / max(component_rank)
+    ) %>%
+    select(
+      sensor, 
+      tube_number, 
+      all_of(component), 
+      component_percentile, X1:X256
+      ) %>%
+    pivot_longer(
+      cols = X1:X256, 
+      names_to = "channel", 
+      values_to = "absorbance"
+      ) %>%
+    mutate(channel = as.numeric(str_extract(channel, "\\d+")))
+
+  p <- tbl %>%
+    ggplot() +
+    aes(x = channel, y = absorbance, color = !!sym(component)) +
+    geom_line(aes(group = paste(sensor, tube_number)), alpha = 0.6) +
+    labs(
+      title = paste("NIRS Spectra Colored by", str_to_title(component)),
+      subtitle = "Each line represents one sensor-tube combination",
+      x = "Wavelength Channel",
+      y = "Absorbance"
+    ) +
+    theme_minimal()
+  
+  if (!is.null(trans)) {
+    p <- p + scale_color_viridis_c(
+      name = str_to_title(component),
+      trans = trans
+      )
+  } else {
+    p <- p + scale_color_viridis_c(
+      name = str_to_title(component)
+      )
+  }
+  
+  return(p)
+}
+```
+
+``` r
+p_fat <- spec_by_target(avg_spec, "fat")
+p_protein <- spec_by_target(avg_spec, "protein") 
+p_scc <- spec_by_target(avg_spec, "scc", trans = "log")
+p_lactose <- spec_by_target(avg_spec, "lactose", trans = "sqrt")
+```
+
+``` r
+(p_fat + p_protein) / (p_scc + p_lactose)
+```
+
+<img src="man/figures/README-unnamed-chunk-74-1.png" width="100%" style="display: block; margin: auto;" />
+
+``` r
+pp1 <- avg_spec %>%
+  select(starts_with("X")) %>%
+  specProc::snv() %>%
+  pluck("correction") %>%
+  derivative(window_size = 11, poly_order = 2, deriv = 2) %>%
+  bind_cols(avg_spec %>% select(-starts_with("X"))) %>% 
+  spec_by_target("protein") +
+  labs(
+      x = "Wavelength Channel",
+      y = "Preprocessed Signal"
+    )
+```
+
+``` r
+pp2 <- avg_spec %>%
+  select(starts_with("X")) %>%
+  specProc::snv() %>%
+  pluck("correction") %>%
+  derivative(window_size = 11, poly_order = 2, deriv = 2) %>%
+  bind_cols(avg_spec %>% select(-starts_with("X"))) %>% 
+  spec_by_target("lactose") +
+  labs(
+      x = "Wavelength Channel",
+      y = "Preprocessed Signal"
+    )
+```
+
+``` r
+pp1 / pp2
+```
+
+<img src="man/figures/README-unnamed-chunk-77-1.png" width="100%" style="display: block; margin: auto;" />
+
+``` r
+corr_heatmap <- function(
+    data, 
+    target_vars = c("fat", "protein", "scc", "lactose"),
+    methods = c("pearson", "spearman"),
+    colors = list(low = "#0066CC", mid = "white", high = "#CC0000")
+    ) {
+  plot_fun <- function(method_name) {
+    correlation_analysis <- data %>%
+      select(all_of(target_vars), X1:X256) %>%
+      drop_na() %>%
+      cor(use = "everything", method = method_name)
+  
+    df <- correlation_analysis[
+      target_vars,
+      paste0("X", 1:256)
+    ] %>%
+      as.data.frame() %>%
+      rownames_to_column("component") %>%
+      pivot_longer(
+        cols = -component,
+        names_to = "channel",
+        values_to = "correlation"
+      ) %>%
+      mutate(channel_num = as.numeric(str_extract(channel, "\\d+")))
+    
+    p <- df %>%
+      ggplot() +
+      aes(x = channel_num, y = component, fill = correlation) +
+      geom_tile() +
+      scale_fill_gradient2(
+        low = colors$low,
+        mid = colors$mid,
+        high = colors$high,
+        midpoint = 0,
+        name = "Correlation",
+        limits = c(min(df$correlation), max(df$correlation))
+        ) +
+      labs(
+        title = paste(
+          "Spectral-Component Correlation -", 
+          str_to_title(method_name)
+          ),
+        x = "Wavelength Channel",
+        y = ""
+        ) +
+      theme_minimal()
+    return(p)
+  }
+  plots <- map(methods, plot_fun)
+  names(plots) <- methods
+  
+  if(length(methods) == 1) {
+    return(plots[[1]])
+  } else {
+    return(wrap_plots(plots, ncol = 1))
+    }
+}
+```
+
+``` r
+avg_spec %>% drop_na() %>% corr_heatmap()
+```
+
+<img src="man/figures/README-unnamed-chunk-79-1.png" width="100%" style="display: block; margin: auto;" />
+
+``` r
+avg_spec %>%
+  drop_na() %>%
+  select(starts_with("X")) %>%
+  specProc::snv() %>%
+  pluck("correction") %>%
+  derivative(window_size = 11, poly_order = 2, deriv = 2) %>%
+  bind_cols(avg_spec %>% drop_na() %>% select(all_of(target_var))) %>%
+  drop_na() %>%
+  corr_heatmap()
+```
+
+<img src="man/figures/README-unnamed-chunk-80-1.png" width="100%" style="display: block; margin: auto;" />
+
+### PCA analysis
+
+``` r
+pca_mod <- avg_spec %>%
   select(starts_with("X")) %>%
   PCA(scale.unit = FALSE, graph = FALSE)
 ```
@@ -1246,29 +1444,38 @@ pca_mod <- cleaned_data %>%
 pca_scores <- pca_mod %>%
   pluck("ind", "coord") %>%
   as_tibble() %>%
-  bind_cols(cleaned_data %>% select(sensor, all_of(target_var)), .) %>%
-  print()
-#> # A tibble: 50,219 × 10
-#>    sensor     fat protein   scc lactose   Dim.1   Dim.2   Dim.3   Dim.4   Dim.5
-#>    <fct>    <dbl>   <dbl> <dbl>   <dbl>   <dbl>   <dbl>   <dbl>   <dbl>   <dbl>
-#>  1 sensor_1   4.4     3.1     9     4.5  -2342.   8213.  -5490.  11666.  -3778.
-#>  2 sensor_1   4.4     3.1     9     4.5  43452.  16707.    153.   6632.  -1214.
-#>  3 sensor_1   4.4     3.1     9     4.5 -63385.  -3370.  -9394.  10449.  -8350.
-#>  4 sensor_1   4.4     3.1     9     4.5  24547. -24867. -11323.  -1770. -13226.
-#>  5 sensor_1   4.4     3.1     9     4.5 -50533.   6295.  -5326.  11477.  -6143.
-#>  6 sensor_1   4.4     3.1     9     4.5  13674. -15654. -10099.   2743. -10755.
-#>  7 sensor_1   4.4     3.1     9     4.5  70819. -22486.  -5118. -11239. -12079.
-#>  8 sensor_1   4.4     3.1     9     4.5 -12489.  23744.  -1204.  13761.   4217.
-#>  9 sensor_1   4.4     3.1     9     4.5  85188.  -9389.    583. -10156. -10189.
-#> 10 sensor_1   4.4     3.1     9     4.5 -10032. -10701. -10506.   7939. -10884.
-#> # ℹ 50,209 more rows
+  bind_cols(avg_spec %>% select(sensor, all_of(target_var)), .)
 ```
 
 ``` r
-ellipse1 <- pca_scores %>%
-  select(starts_with("Dim")) %>%
-  HotellingEllipse::ellipseCoord(pcx = 1, pcy = 2)
+t2 <- pca_scores %>%
+  select(Dim.1, Dim.2, Dim.3) %>%
+  HotellingEllipse::ellipseParam(k = 3) %>%
+  pluck("Tsquare")
 ```
+
+``` r
+plot3D::scatter3D(
+  x = pca_scores$Dim.1,
+  y = pca_scores$Dim.2,
+  z = pca_scores$Dim.3,
+  theta = 50,
+  phi = 20,
+  bty = "g",
+  pch = 20,
+  cex = 1.5,
+  ticktype = "detailed",
+  colvar = t2$value,
+  clim = range(t2$value),
+  xlab = "Dim.1",
+  ylab = "Dim.2",
+  zlab = "Dim.3",
+  main = "3D PCA Score Plot of Milk Spectra",
+  clab = "Hotelling’s T²\nStatistics"
+)
+```
+
+<img src="man/figures/README-unnamed-chunk-84-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
 t1 <- round(as.numeric(pca_mod$eig[1,2]), 2)
@@ -1277,12 +1484,23 @@ t3 <- round(as.numeric(pca_mod$eig[3,2]), 2)
 ```
 
 ``` r
-p1 <- ggplot() +
-  geom_polygon(data = ellipse1, aes(x, y), color = "black", fill = "white") +
-  geom_point(data = pca_scores, aes(x = Dim.1, y = Dim.2, fill = sensor), shape = 21, size = 3, color = "black") +
+p1 <- pca_scores %>%
+  ggplot() +
+  aes(x = Dim.1, y = Dim.2, fill = sensor) +
+  geom_point(shape = 21, size = 3, color = "black") +
   scale_fill_viridis_d(option = "viridis") +
-  geom_hline(yintercept = 0, linetype = "solid", color = "black", linewidth = .2) +
-  geom_vline(xintercept = 0, linetype = "solid", color = "black", linewidth = .2) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "solid",
+    color = "black",
+    linewidth = .2
+  ) +
+  geom_vline(
+    xintercept = 0,
+    linetype = "solid",
+    color = "black",
+    linewidth = .2
+  ) +
   labs(x = glue::glue("Dim1 [{t1}%]"), y = glue::glue("Dim2 [{t2}%]")) +
   theme_grey() +
   theme(
@@ -1290,135 +1508,54 @@ p1 <- ggplot() +
     aspect.ratio = .7,
     panel.grid = element_blank(),
     panel.background = element_rect(
-    colour = "black",
-    linewidth = .3
+      colour = "black",
+      linewidth = .3
     )
   )
 
-p2 <- ggplot() +
-  geom_polygon(data = ellipse1, aes(x, y), color = "black", fill = "white") +
-  geom_point(data = pca_scores, aes(x = Dim.1, y = Dim.3, fill = sensor), shape = 21, size = 3, color = "black") +
+p2 <- pca_scores %>%
+  ggplot() +
+  aes(x = Dim.1, y = Dim.3, fill = sensor) +
+  geom_point(shape = 21, size = 3, color = "black") +
   scale_fill_viridis_d(option = "viridis") +
-  geom_hline(yintercept = 0, linetype = "solid", color = "black", linewidth = .2) +
-  geom_vline(xintercept = 0, linetype = "solid", color = "black", linewidth = .2) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "solid",
+    color = "black",
+    linewidth = .2
+  ) +
+  geom_vline(
+    xintercept = 0,
+    linetype = "solid",
+    color = "black",
+    linewidth = .2
+  ) +
   labs(
-    x = glue::glue("Dim1 [{t1}%]"), 
+    x = glue::glue("Dim1 [{t1}%]"),
     y = glue::glue("Dim3 [{t3}%]")
-    ) +
-  theme_grey() +
-   theme(
-    aspect.ratio = .7,
-    panel.grid = element_blank(),
-    panel.background = element_rect(
-    colour = "black",
-    linewidth = .3
-    )
-  )
-```
-
-``` r
-wrap_plots(p1, p2, ncol = 1) + 
-  plot_layout(guides = "collect")
-```
-
-<img src="man/figures/README-unnamed-chunk-76-1.png" width="100%" style="display: block; margin: auto;" />
-
-The sensor differences are primarily captured by Dim3 (5.96% variance),
-while Dim1 and Dim2 (which together explain 71.38% + 14.13% = ~85.4% of
-the variation) show much more overlap between sensors. This means that
-the major sources of variation (Dim1 & Dim2) are likely driven by actual
-sample properties (milk composition differences), while the
-sensor-to-sensor differences are relegated to a minor component (Dim3).
-Consequently, models built on this data should be reasonably robust
-across sensors since the main variation is sample-driven.
-
-``` r
-pca_sensor1 <- cleaned_data %>%
-  filter(sensor == "sensor_1") %>%
-  select(starts_with("X")) %>%
-  PCA(scale.unit = FALSE, graph = FALSE)
-```
-
-``` r
-scores_sensor1 <- pca_sensor1 %>%
-  pluck("ind", "coord") %>%
-  as_tibble() %>%
-  bind_cols(cleaned_data %>% filter(sensor == "sensor_1") %>% select(sensor, all_of(target_var)), .) %>%
-  print()
-#> # A tibble: 4,330 × 10
-#>    sensor     fat protein   scc lactose   Dim.1   Dim.2   Dim.3  Dim.4   Dim.5
-#>    <fct>    <dbl>   <dbl> <dbl>   <dbl>   <dbl>   <dbl>   <dbl>  <dbl>   <dbl>
-#>  1 sensor_1   4.4     3.1     9     4.5  12537.   5978.  13881. -5472.  1658. 
-#>  2 sensor_1   4.4     3.1     9     4.5  54470.  27069.   7754. -5185.  1977. 
-#>  3 sensor_1   4.4     3.1     9     4.5 -43765. -20822.  14369.  3431. -1919. 
-#>  4 sensor_1   4.4     3.1     9     4.5  46009. -19912.  -4595. -1212.  1078. 
-#>  5 sensor_1   4.4     3.1     9     4.5 -33701.  -7495.  15639.  2618. -2245. 
-#>  6 sensor_1   4.4     3.1     9     4.5  33475. -13776.   1360. -3011.    97.0
-#>  7 sensor_1   4.4     3.1     9     4.5  89512.  -3802. -15135.  4605.   493. 
-#>  8 sensor_1   4.4     3.1     9     4.5  -1106.  20356.  19470. -2828.  3952. 
-#>  9 sensor_1   4.4     3.1     9     4.5 100189.  13376. -13556.  4325. -2513. 
-#> 10 sensor_1   4.4     3.1     9     4.5   9583. -15481.   8194. -4209. -2155. 
-#> # ℹ 4,320 more rows
-```
-
-``` r
-ellipse1 <- scores_sensor1 %>%
-  select(starts_with("Dim")) %>%
-  HotellingEllipse::ellipseCoord(pcx = 1, pcy = 2)
-```
-
-``` r
-t1 <- round(as.numeric(pca_sensor1$eig[1,2]), 2)
-t2 <- round(as.numeric(pca_sensor1$eig[2,2]), 2)
-t3 <- round(as.numeric(pca_sensor1$eig[3,2]), 2)
-```
-
-``` r
-p1 <- ggplot() +
-  geom_polygon(data = ellipse1, aes(x, y), color = "black", fill = "white") +
-  geom_point(data = scores_sensor1, aes(x = Dim.1, y = Dim.2, fill = protein), shape = 21, size = 3, color = "black") +
-  scale_fill_viridis_c(option = "viridis") +
-  geom_hline(yintercept = 0, linetype = "solid", color = "black", linewidth = .2) +
-  geom_vline(xintercept = 0, linetype = "solid", color = "black", linewidth = .2) +
-  labs(x = glue::glue("Dim1 [{t1}%]"), y = glue::glue("Dim2 [{t2}%]")) +
+  ) +
   theme_grey() +
   theme(
-    legend.position = "none",
     aspect.ratio = .7,
     panel.grid = element_blank(),
     panel.background = element_rect(
-    colour = "black",
-    linewidth = .3
-    )
-  )
-
-p2 <- ggplot() +
-  geom_polygon(data = ellipse1, aes(x, y), color = "black", fill = "white") +
-  geom_point(data = scores_sensor1, aes(x = Dim.1, y = Dim.3, fill = protein), shape = 21, size = 3, color = "black") +
-  scale_fill_viridis_c(option = "viridis") +
-  geom_hline(yintercept = 0, linetype = "solid", color = "black", linewidth = .2) +
-  geom_vline(xintercept = 0, linetype = "solid", color = "black", linewidth = .2) +
-  labs(
-    x = glue::glue("Dim1 [{t1}%]"), 
-    y = glue::glue("Dim3 [{t3}%]")
-    ) +
-  theme_grey() +
-   theme(
-    aspect.ratio = .7,
-    panel.grid = element_blank(),
-    panel.background = element_rect(
-    colour = "black",
-    linewidth = .3
+      colour = "black",
+      linewidth = .3
     )
   )
 ```
 
 ``` r
-wrap_plots(p1, p2, ncol = 1) + 
-  plot_layout(guides = "collect")
+wrap_plots(p1, p2, ncol = 1) + plot_layout(guides = "collect")
 ```
 
-<img src="man/figures/README-unnamed-chunk-82-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-87-1.png" width="100%" style="display: block; margin: auto;" />
+
+The sensor differences are primarily captured by Dim2 (19.84% variance),
+show much more overlap between sensors. This means that the major
+sources of variation (Dim1 & Dim3) are likely driven by actual sample
+properties (milk composition differences), while the sensor-to-sensor
+differences are relegated to a minor component (Dim3).
 
 # Modeling
 
