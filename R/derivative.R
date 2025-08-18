@@ -110,19 +110,11 @@ derivative <- function(
     if (ncol(metadata) > 0) {
       result <- bind_cols(metadata, derivative_df)
     } else {
-      result <- derivative_df
+      result <- derivative_df %>% as_tibble() %>% drop_na()
     }
   } else {
-    result <- derivative_df
+    result <- derivative_df %>% as_tibble() %>% drop_na()
   }
-  
-  attr(result, "preprocessing") <- list(
-    method = "savitzky_golay_derivative",
-    window_size = window_size,
-    poly_order = poly_order,
-    derivative_order = deriv,
-    timestamp = Sys.time()
-  )
   
   return(result)
 }

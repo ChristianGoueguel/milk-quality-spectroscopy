@@ -1242,12 +1242,6 @@ p5 <- avg_noise_tbl %>%
 ``` r
 avg_spec <- cleaned_data %>%
   select(-datetime) %>%
-  filter(
-    fat > 0,
-    protein > 0, 
-    scc > 0,
-    lactose > 0
-  ) %>%
   group_by(sensor, tube_number) %>%
   summarise(
     across(c(fat, protein, scc, lactose, other, nonfat, ts), first),
@@ -1323,8 +1317,7 @@ pp1 <- avg_spec %>%
   select(starts_with("X")) %>%
   specProc::snv() %>%
   pluck("correction") %>%
-  derivative(window_size = 11, poly_order = 2, deriv = 2) %>%
-  bind_cols(avg_spec %>% select(-starts_with("X"))) %>% 
+  bind_cols(avg_spec %>% select(sensor, tube_number, all_of(target_var))) %>%
   spec_by_target("protein") +
   labs(
       x = "Wavelength Channel",
@@ -1337,8 +1330,7 @@ pp2 <- avg_spec %>%
   select(starts_with("X")) %>%
   specProc::snv() %>%
   pluck("correction") %>%
-  derivative(window_size = 11, poly_order = 2, deriv = 2) %>%
-  bind_cols(avg_spec %>% select(-starts_with("X"))) %>% 
+  bind_cols(avg_spec %>% select(sensor, tube_number, all_of(target_var))) %>%
   spec_by_target("lactose") +
   labs(
       x = "Wavelength Channel",
@@ -1353,20 +1345,20 @@ pp1 / pp2
 <img src="man/figures/README-unnamed-chunk-77-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
-corr_heatmap <- function(
+corrWave <- function(
     data, 
-    target_vars = c("fat", "protein", "scc", "lactose"),
+    var = c("fat", "protein", "scc", "lactose"),
     methods = c("pearson", "spearman"),
     colors = list(low = "#0066CC", mid = "white", high = "#CC0000")
     ) {
+  
   plot_fun <- function(method_name) {
     correlation_analysis <- data %>%
-      select(all_of(target_vars), X1:X256) %>%
-      drop_na() %>%
-      cor(use = "everything", method = method_name)
+      select(all_of(var), X1:X256) %>%
+      cor(use = "complete.obs", method = method_name)
   
     df <- correlation_analysis[
-      target_vars,
+      var,
       paste0("X", 1:256)
     ] %>%
       as.data.frame() %>%
@@ -1401,6 +1393,7 @@ corr_heatmap <- function(
       theme_minimal()
     return(p)
   }
+  
   plots <- map(methods, plot_fun)
   names(plots) <- methods
   
@@ -1413,24 +1406,10 @@ corr_heatmap <- function(
 ```
 
 ``` r
-avg_spec %>% drop_na() %>% corr_heatmap()
+avg_spec %>% corrWave()
 ```
 
 <img src="man/figures/README-unnamed-chunk-79-1.png" width="100%" style="display: block; margin: auto;" />
-
-``` r
-avg_spec %>%
-  drop_na() %>%
-  select(starts_with("X")) %>%
-  specProc::snv() %>%
-  pluck("correction") %>%
-  derivative(window_size = 11, poly_order = 2, deriv = 2) %>%
-  bind_cols(avg_spec %>% drop_na() %>% select(all_of(target_var))) %>%
-  drop_na() %>%
-  corr_heatmap()
-```
-
-<img src="man/figures/README-unnamed-chunk-80-1.png" width="100%" style="display: block; margin: auto;" />
 
 ### PCA analysis
 
@@ -1475,7 +1454,7 @@ plot3D::scatter3D(
 )
 ```
 
-<img src="man/figures/README-unnamed-chunk-84-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-83-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
 t1 <- round(as.numeric(pca_mod$eig[1,2]), 2)
@@ -1549,7 +1528,7 @@ p2 <- pca_scores %>%
 wrap_plots(p1, p2, ncol = 1) + plot_layout(guides = "collect")
 ```
 
-<img src="man/figures/README-unnamed-chunk-87-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-86-1.png" width="100%" style="display: block; margin: auto;" />
 
 The sensor differences are primarily captured by Dim2 (19.84% variance),
 show much more overlap between sensors. This means that the major
