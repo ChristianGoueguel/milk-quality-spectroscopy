@@ -24,10 +24,7 @@
     - [PCA analysis](#pca-analysis-1)
 - [Modeling](#modeling)
   - [Data splits and preprocessing](#data-splits-and-preprocessing)
-  - [Models tuning and evaluation](#models-tuning-and-evaluation)
-  - [Model performance comparison](#model-performance-comparison)
-  - [Prediction plots](#prediction-plots)
-  - [Feature Importance](#feature-importance)
+  - [Models training](#models-training)
 
 <!-- README.md is generated from README.Rmd. Please edit that file -->
 
@@ -46,6 +43,7 @@ suppressPackageStartupMessages({
   library(arrow)
   library(tidymodels)
   library(future)
+  library(doFuture)
   library(corrplot)
   library(vip)
   library(patchwork)
@@ -63,12 +61,21 @@ suppressPackageStartupMessages({
   library(glmnet)
   library(xgboost)
   library(mixOmics)
+  library(plsmod)
 })
 ```
 
 ``` r
 tidymodels_prefer()
 theme_set(theme_light(base_size = 12))
+options(
+  mc_doScale_quiet = TRUE,
+  width = 120,
+  max.print = 100,
+  tibble.print_max = 30,
+  tibble.width = 120,
+  digits = 3
+  )
 ```
 
 # Dataset
@@ -639,13 +646,12 @@ stat_summary <- lab_dataset %>%
 ``` r
 stat_summary
 #> # A tibble: 4 × 14
-#>   variable median   mad    Qn    Sn medcouple   LMC   RMC    rsd biloc biscale
-#>   <chr>     <dbl> <dbl> <dbl> <dbl>     <dbl> <dbl> <dbl>  <dbl> <dbl>   <dbl>
-#> 1 fat         3.4  0.74  0.66  0.72      0     0.23  0.33  1.10   3.41    0.8 
-#> 2 lactose     4.8  0.15  0.22  0.12     -0.2   0     0     0.222  4.79    0.18
-#> 3 protein     2.8  0.3   0.22  0.24      0     0.33 -0.33  0.445  2.81    0.25
-#> 4 scc        37   46.0  44.2  42.9       0.72 -0.11  0.57 68.1   42.4    68.7 
-#> # ℹ 3 more variables: bivar <dbl>, rcv <dbl>, count <int>
+#>   variable median   mad    Qn    Sn medcouple   LMC   RMC    rsd biloc biscale   bivar    rcv count
+#>   <chr>     <dbl> <dbl> <dbl> <dbl>     <dbl> <dbl> <dbl>  <dbl> <dbl>   <dbl>   <dbl>  <dbl> <int>
+#> 1 fat         3.4  0.74  0.66  0.72      0     0.23  0.33  1.10   3.41    0.8     0.6   32.3   1080
+#> 2 lactose     4.8  0.15  0.22  0.12     -0.2   0     0     0.222  4.79    0.18    0.03   4.63  1080
+#> 3 protein     2.8  0.3   0.22  0.24      0     0.33 -0.33  0.445  2.81    0.25    0.06  15.9   1080
+#> 4 scc        37   46.0  44.2  42.9       0.72 -0.11  0.57 68.1   42.4    68.7  3078.   184.    1080
 ```
 
 ``` r
@@ -1541,324 +1547,202 @@ differences are relegated to a minor component (Dim3).
 ## Data splits and preprocessing
 
 ``` r
-models_workflow <- function(modeling_data, target_variable) {
-  cat(sprintf("\n=== Creating workflow for %s ===\n", target_variable))
-  
-  data_split <- initial_split(
-    modeling_data, 
-    prop = 0.8, 
-    strata = all_of(target_variable)
-    )
-  
-  train_data <- training(data_split)
-  test_data <- testing(data_split)
-  
-  cat("Training set:", nrow(train_data), "samples\n")
-  cat("Test set:", nrow(test_data), "samples\n")
-  
-  cv_folds <- vfold_cv(train_data, v = 5, strata = all_of(target_variable))
-  
-  recipe_spec <- recipe(
-    as.formula(paste(target_variable, "~ .")), 
-    data = train_data
-    ) %>%
-    step_rm(tube_number, sensor) %>%
+split <- avg_spec %>%
+    select(all_of(target_var), starts_with("X")) %>%
+    initial_split(prop = 0.8)
+```
+
+``` r
+train_data <- training(split)
+test_data <- testing(split)
+cv_folds <- vfold_cv(train_data, v = 5, repeats = 3)
+```
+
+``` r
+cv_folds %>%
+  tidy() %>%
+  ggplot(aes(x = Fold, y = Row, fill = Data)) +
+  geom_tile() + 
+  facet_wrap(~Repeat) + 
+  scale_fill_brewer(palette = "Paired") +
+  theme(legend.position = "top")
+```
+
+<img src="man/figures/README-unnamed-chunk-89-1.png" width="100%" style="display: block; margin: auto;" />
+
+``` r
+recipes <- map(target_var, ~ {
+  current_target <- .x
+  other_targets <- setdiff(target_var, current_target)
+  train_data %>%
+    recipe(reformulate(".", response = current_target)) %>%
+    update_role(all_of(current_target), new_role = "outcome") %>%
+    update_role(all_of(other_targets), new_role = "ID") %>%
+    update_role(starts_with("X"), new_role = "predictor") %>%
     step_zv(all_predictors()) %>%
     step_center(all_numeric_predictors())
-  
-  return(list(
-    split = data_split,
-    train = train_data,
-    test = test_data,
-    cv_folds = cv_folds,
-    recipe = recipe_spec
-  ))
-}
+  }) %>%
+  purrr::set_names(target_var)
 ```
 
-## Models tuning and evaluation
+``` r
+summary(recipes)
+#>         Length Class  Mode
+#> fat     9      recipe list
+#> protein 9      recipe list
+#> scc     9      recipe list
+#> lactose 9      recipe list
+```
+
+## Models training
 
 ``` r
-models_def <- function() {
-  cat("Defining model specifications...\n")
-  
-  rf_spec <- rand_forest() %>%
-    set_args(
-      mtry = tune(),
-      trees = tune(),
-      min_n = tune()
-      ) %>%
-    set_engine("ranger", importance = "impurity") %>%
-    set_mode("regression")
-  
-  elastic_spec <- linear_reg() %>%
-    set_args(
-      penalty = tune(),
-      mixture = tune()
-      ) %>%
-    set_engine("glmnet") %>%
-    set_mode("regression")
-  
-  xgb_spec <- boost_tree() %>%
-    set_args(
-      trees = tune(), 
-      tree_depth = tune(), 
-      learn_rate = tune(), 
-      min_n = tune()
-      ) %>%
-    set_engine("xgboost") %>%
-    set_mode("regression")
-  
-  spls_spec <- pls() %>%
-  set_args(
-    predictor_prop = tune(), 
-    num_comp = tune()
-    ) %>%
+# Partial Least Squares Regression
+spls_spec <- pls() %>%
+  set_args(predictor_prop = tune(), num_comp = tune()) %>%
   set_engine("mixOmics") %>%
   set_mode("regression")
-  
-  return(list(
-    random_forest = rf_spec,
-    elastic_net = elastic_spec,
-    xgboost = xgb_spec,
-    spls = spls_spec
-  ))
-}
+
+# Elastic Net
+enet_spec <- linear_reg() %>%
+  set_args(penalty = tune(), mixture = tune()) %>%
+  set_engine("glmnet") %>%
+  set_mode("regression")
+
+# Random Forest
+rf_spec <- rand_forest() %>%
+  set_args(mtry = tune(), trees = tune(), min_n = tune()) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("regression")
+
+# XGBoost 
+xgb_spec <- boost_tree() %>%
+  set_args(
+    trees = tune(), tree_depth = tune(), learn_rate = tune(), min_n = tune()
+  ) %>%
+  set_engine("xgboost") %>%
+  set_mode("regression")
 ```
 
 ``` r
-models_eval <- function(workflow_data, models, target_variable) {
-  cat(sprintf("Tuning models for %s...\n", target_variable))
-  
-  if (Sys.info()["sysname"] == "Darwin") {
+wflowSets <- map(names(recipes), ~ {
+  target_name <- .x
+  workflow_set(
+    preproc = list(base = recipes[[.x]]),
+    models = list(
+      spls = spls_spec,
+      enet = enet_spec,
+      rf = rf_spec,
+      xgb = xgb_spec
+      ),
+    cross = TRUE
+    ) %>%
+    mutate(wflow_id = paste(target_name, wflow_id, sep = "_"))
+  }) %>%
+  purrr::set_names(names(recipes))
+```
+
+``` r
+wflowSet <- bind_rows(wflowSets)
+```
+
+``` r
+wflowSet
+#> # A workflow set/tibble: 16 × 4
+#>    wflow_id          info             option    result    
+#>    <chr>             <list>           <list>    <list>    
+#>  1 fat_base_spls     <tibble [1 × 4]> <opts[0]> <list [0]>
+#>  2 fat_base_enet     <tibble [1 × 4]> <opts[0]> <list [0]>
+#>  3 fat_base_rf       <tibble [1 × 4]> <opts[0]> <list [0]>
+#>  4 fat_base_xgb      <tibble [1 × 4]> <opts[0]> <list [0]>
+#>  5 protein_base_spls <tibble [1 × 4]> <opts[0]> <list [0]>
+#>  6 protein_base_enet <tibble [1 × 4]> <opts[0]> <list [0]>
+#>  7 protein_base_rf   <tibble [1 × 4]> <opts[0]> <list [0]>
+#>  8 protein_base_xgb  <tibble [1 × 4]> <opts[0]> <list [0]>
+#>  9 scc_base_spls     <tibble [1 × 4]> <opts[0]> <list [0]>
+#> 10 scc_base_enet     <tibble [1 × 4]> <opts[0]> <list [0]>
+#> 11 scc_base_rf       <tibble [1 × 4]> <opts[0]> <list [0]>
+#> 12 scc_base_xgb      <tibble [1 × 4]> <opts[0]> <list [0]>
+#> 13 lactose_base_spls <tibble [1 × 4]> <opts[0]> <list [0]>
+#> 14 lactose_base_enet <tibble [1 × 4]> <opts[0]> <list [0]>
+#> 15 lactose_base_rf   <tibble [1 × 4]> <opts[0]> <list [0]>
+#> 16 lactose_base_xgb  <tibble [1 × 4]> <opts[0]> <list [0]>
+```
+
+``` r
+ctrl_grid <- control_grid(
+  verbose = TRUE,
+  allow_par = TRUE,
+  extract = NULL,
+  save_pred = TRUE,
+  pkgs = "doFuture",
+  save_workflow = FALSE,
+  event_level = "first",
+  parallel_over = "resamples"
+  )
+```
+
+``` r
+if (Sys.getenv("RSTUDIO") == "1") {
+  plan(multisession, workers = min(parallel::detectCores() - 1, 8))
+  } else if (Sys.info()["sysname"] == "Darwin") {
     plan(multicore, workers = min(parallel::detectCores() - 2, 8))
     } else {
-      plan(multisession, workers = parallel::detectCores() - 1)
-      }
-  
-  results <- list()
-
-  for (model_name in names(models)) {
-    cat(sprintf("Processing %s...\n", model_name))
-
-    workflow_spec <- workflow() %>%
-      add_recipe(workflow_data$recipe) %>%
-      add_model(models[[model_name]])
-
-    if (model_name == "random_forest") {
-      tune_grid <- grid_regular(
-        mtry(range = c(5, 20)),
-        trees(range = c(100, 500)),
-        min_n(range = c(5, 20)),
-        levels = 3
-      )
-    } else if (model_name == "elastic_net") {
-      tune_grid <- grid_regular(
-        penalty(),
-        mixture(),
-        levels = 5
-      )
-    } else if (model_name == "xgboost") {
-      tune_grid <- grid_regular(
-        trees(range = c(100, 500)),
-        tree_depth(range = c(3, 10)),
-        learn_rate(range = c(0.01, 0.3)),
-        min_n(range = c(5, 20)),
-        levels = 3
-      )
-    } else if (model_name == "spls") {
-      tune_grid <- grid_regular(
-        spectral_features(),
-        num_comp(),
-        levels = 5
-      )
+      plan(multisession, workers = min(parallel::detectCores() - 1, 8))
     }
 
-    ctrl_grid <- control_grid(
-      verbose = TRUE,
-      allow_par = TRUE,
-      save_pred = TRUE,
-      save_workflow = FALSE,
-      parallel_over = "resamples"
-    )
-    
-    tune_results <- workflow_spec %>%
-      tune_grid(
-        resamples = workflow_data$cv_folds,
-        grid = tune_grid,
-        metrics = metric_set(rmse, rsq, mae),
-        control = ctrl_grid
-      )
-
-    best_params <- tune_results %>%
-      select_best(metric = "rmse")
-
-    final_workflow <- workflow_spec %>%
-      finalize_workflow(best_params)
-
-    final_fit <- final_workflow %>%
-      fit(workflow_data$train)
-
-    test_predictions <- final_fit %>%
-      predict(workflow_data$test) %>%
-      bind_cols(workflow_data$test %>% select(all_of(target_variable)))
-
-    test_metrics <- test_predictions %>%
-      metrics(truth = !!sym(target_variable), estimate = .pred)
-
-    results[[model_name]] <- list(
-      tune_results = tune_results,
-      best_params = best_params,
-      final_fit = final_fit,
-      test_predictions = test_predictions,
-      test_metrics = test_metrics
-    )
-  }
-  return(results)
-}
-```
-
-## Model performance comparison
-
-``` r
-models_performance <- function(model_results, target_variable) {
-  cat(sprintf("\n=== Model Performance Comparison for %s ===\n", target_variable))
-  
-  performance_summary <- map_dfr(model_results, ~ {
-    .x$test_metrics %>%
-      filter(.metric %in% c("rmse", "rsq", "mae")) %>%
-      select(.metric, .estimate)
-  }, .id = "model")
-
-  performance_table <- performance_summary %>%
-    pivot_wider(names_from = .metric, values_from = .estimate) %>%
-    arrange(rmse)
-  
-  print(performance_table)
-  
-  p1 <- performance_summary %>%
-    filter(.metric == "rmse") %>%
-    ggplot(aes(x = reorder(model, .estimate), y = .estimate, fill = model)) +
-    geom_col() +
-    coord_flip() +
-    labs(
-      title = paste("RMSE Comparison -", target_variable),
-      x = "Model",
-      y = "RMSE",
-      fill = "Model"
-    ) +
-    theme_light() +
-    theme(legend.position = "none")
-  
-  p2 <- performance_summary %>%
-    filter(.metric == "rsq") %>%
-    ggplot(aes(x = reorder(model, -.estimate), y = .estimate, fill = model)) +
-    geom_col() +
-    coord_flip() +
-    labs(
-      title = paste("R² Comparison -", target_variable),
-      x = "Model",
-      y = "R²",
-      fill = "Model"
-    ) +
-    theme_light() +
-    theme(legend.position = "none")
-  
-  print(p1 / p2)
-  return(performance_table)
-}
-```
-
-## Prediction plots
-
-``` r
-prediction_plots <- function(model_results, target_variable) {
-  plots <- map(names(model_results), ~ {
-    predictions <- model_results[[.x]]$test_predictions
-    
-    predictions %>%
-      ggplot(aes(x = !!sym(target_variable), y = .pred)) +
-      geom_point(alpha = 0.6) +
-      geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
-      labs(
-        title = paste(.x, "-", target_variable),
-        x = paste("Actual", target_variable),
-        y = paste("Predicted", target_variable)
-      ) +
-      theme_light()
-  })
-  
-  names(plots) <- names(model_results)
-  combined_plot <- wrap_plots(plots, ncol = 2)
-  
-  print(combined_plot)
-  return(plots)
-}
-```
-
-## Feature Importance
-
-``` r
-feature_importance <- function(model_results, target_variable, top_n = 15) {
-  cat(sprintf("\nExtracting feature importance for %s...\n", target_variable))
-  
-  importance_plots <- list()
-  
-  for (model_name in names(model_results)) {
-    tryCatch({
-      if (model_name %in% c("random_forest", "xgboost")) {
-        importance_plot <- model_results[[model_name]]$final_fit %>%
-          extract_fit_parsnip() %>%
-          vip(num_features = top_n) +
-          labs(title = paste("Feature Importance -", model_name, "-", target_variable)) +
-          theme_minimal()
-        importance_plots[[model_name]] <- importance_plot
-      }
-    }, error = function(e) {
-      cat(sprintf("Could not extract importance for %s: %s\n", model_name, e$message))
-    })
-  }
-  
-  if (length(importance_plots) > 0) {
-    combined_importance <- wrap_plots(importance_plots, ncol = 2)
-    print(combined_importance)
-  }
-  
-  return(importance_plots)
-}
+registerDoFuture()
+wflowSet %<>%
+  workflow_map(
+    fn = "tune_grid",
+    resamples = cv_folds,
+    grid = 10,
+    metrics = metric_set(rmse, mae, rsq),
+    control = ctrl_grid,
+    seed = 3L,
+    verbose = TRUE
+  )
+plan(sequential)
 ```
 
 ``` r
-run_milk_quality_prediction <- function(
-    data, 
-    target_var = c("fat_percent", "protein_percent", "scc_thous_per_ml", "lactose_percent")
-    ) {
-  
-  cat("=== NIRS Milk Quality Prediction Analysis ===\n")
-  
-  models <- models_def()
-  all_results <- list()
-  all_performance <- list()
-  
-  for (target in target_var) {
-    cat(sprintf("\n\n### PROCESSING TARGET: %s ###\n", target))
-    
-    workflow_data <- models_workflow(modeling_data, target)
-    model_results <- models_eval(workflow_data, models, target)
-    performance <- models_performance(model_results, target)
-    pred_plots <- prediction_plots(model_results, target)
-    importance_plots <- feature_importance(model_results, target)
-    
-    all_results[[target]] <- model_results
-    all_performance[[target]] <- performance
-  }
-  cat("\n=== Analysis Complete! ===\n")
-  cat("Results stored in all_results and all_performance\n")
-  
-  return(list(
-    results = all_results,
-    performance = all_performance,
-    modeling_data = modeling_data
-  ))
-}
+wflowSet %>%
+  rank_results(rank_metric = "rmse") %>%
+  relocate(c(rank, model, .metric, mean, std_err), .before = wflow_id) %>%
+  mutate(mean = round(mean, 4), std_err = round(std_err, 4))
+#> # A tibble: 480 × 9
+#>     rank model      .metric     mean std_err wflow_id          .config                   n preprocessor
+#>    <int> <chr>      <chr>      <dbl>   <dbl> <chr>             <chr>                 <int> <chr>       
+#>  1     1 linear_reg mae       0.224   0.0079 protein_base_enet Preprocessor1_Model07    15 recipe      
+#>  2     1 linear_reg rmse      0.361   0.0287 protein_base_enet Preprocessor1_Model07    15 recipe      
+#>  3     1 linear_reg rsq     NaN      NA      protein_base_enet Preprocessor1_Model07     0 recipe      
+#>  4     2 pls        mae       0.228   0.0085 protein_base_spls Preprocessor1_Model07    15 recipe      
+#>  5     2 pls        rmse      0.361   0.0283 protein_base_spls Preprocessor1_Model07    15 recipe      
+#>  6     2 pls        rsq       0.0077  0.0021 protein_base_spls Preprocessor1_Model07    15 recipe      
+#>  7     3 linear_reg mae       0.225   0.0082 protein_base_enet Preprocessor1_Model03    15 recipe      
+#>  8     3 linear_reg rmse      0.362   0.0286 protein_base_enet Preprocessor1_Model03    15 recipe      
+#>  9     3 linear_reg rsq       0.0033  0.001  protein_base_enet Preprocessor1_Model03    14 recipe      
+#> 10     4 pls        mae       0.228   0.0084 protein_base_spls Preprocessor1_Model09    15 recipe      
+#> # ℹ 470 more rows
 ```
+
+``` r
+wflowSet %>% 
+  autoplot(std_errs = qnorm(0.95), type = "wflow_id") +
+  ggsci::scale_color_lancet() +
+  theme(legend.position = "bottom") +
+  ylab("")
+```
+
+<img src="man/figures/README-unnamed-chunk-99-1.png" width="100%" style="display: block; margin: auto;" />
+
+``` r
+wflowSet %>% 
+  autoplot(select_best = TRUE, std_errs = qnorm(0.95), type = "wflow_id") +
+  geom_point(size = 3) +
+  ggsci::scale_color_lancet() +
+  theme(legend.position = "bottom") +
+  ylab("")
+```
+
+<img src="man/figures/README-unnamed-chunk-100-1.png" width="100%" style="display: block; margin: auto;" />
