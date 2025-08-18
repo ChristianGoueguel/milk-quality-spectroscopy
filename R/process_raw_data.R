@@ -76,9 +76,9 @@
 #' \code{\link{read_sensor_csvs}} for CSV data ingestion
 #' \code{\link{read_sensor_parquets}} for parquet data ingestion
 #' \code{\link{subtract_dark_spectrum}} for baseline correction
-#' @export process_nir_data 
+#' @export process_raw_data 
 #' @importFrom purrr map map_dfr
-process_nir_data <- function(verbose = FALSE) {
+process_raw_data <- function(verbose = FALSE) {
   if (!is.logical(verbose) || length(verbose) != 1) {
     stop("Argument 'verbose' must be a single logical value (TRUE or FALSE)")
   }

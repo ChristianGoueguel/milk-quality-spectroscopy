@@ -9,14 +9,15 @@
   - [Sensor wavelengths](#sensor-wavelengths)
   - [Sensor data](#sensor-data)
   - [Laboratory data](#laboratory-data)
+  - [Processed data](#processed-data)
   - [Cleaned data](#cleaned-data)
-  - [Observations by Sensor](#observations-by-sensor)
-  - [Measurement timeline](#measurement-timeline)
+  - [Measurements by Sensor and Tube](#measurements-by-sensor-and-tube)
+  - [Measurements timeline](#measurements-timeline)
 - [Exploratory Data Analysis](#exploratory-data-analysis)
   - [Descriptive statistics for milk quality target
     variables](#descriptive-statistics-for-milk-quality-target-variables)
   - [PCA analysis](#pca-analysis)
-    - [Milk quality target_var](#milk-quality-target_var)
+    - [Milk quality components](#milk-quality-components)
     - [NIRS spectra](#nirs-spectra)
       - [Measurement Quality
         Assessment](#measurement-quality-assessment)
@@ -124,11 +125,11 @@ functions_path <- "~/Documents/GitHub/milk-quality-spectroscopy/R/"
 source(paste0(functions_path, "read_sensor_csvs.R"))
 source(paste0(functions_path, "read_sensor_parquets.R"))
 source(paste0(functions_path, "subtract_dark_spectrum.R"))
-source(paste0(functions_path, "process_nir_data.R"))
+source(paste0(functions_path, "process_raw_data.R"))
 ```
 
 ``` r
-nir_data <- process_nir_data(verbose = FALSE)
+raw_dataset <- process_raw_data(verbose = FALSE)
 #> Beginning NIR data processing for 12 sensor(s)
 #> Processing CSV files...
 #> Processing parquet files...
@@ -140,7 +141,7 @@ nir_data <- process_nir_data(verbose = FALSE)
 ## Sensor wavelengths
 
 ``` r
-sensor_wavelengths_list <- nir_data$sensor_data %>%
+sensor_wavelengths_list <- raw_dataset$sensor_data %>%
   select(sensor, wavelengths_nm) %>%
   mutate(
     wavelength_chars = 
@@ -249,9 +250,11 @@ wavelength_tbl %>%
 ## Sensor data
 
 ``` r
-spec_data <- nir_data$corrected_spectra %>%
+sensor_dataset <- raw_dataset %>%
+  pluck("corrected_spectra") %>%
   filter(spec_type == "SAMPLE") %>%
-  select(datetime, tube_number, sensor, spec_array) %>%
+  select(session_from, datetime, tube_number, sensor, spec_array) %>%
+  modify_at("session_from", as_factor) %>%
   modify_at("tube_number", as_factor) %>%
   modify_at("sensor", as_factor) %>%
   mutate(
@@ -290,22 +293,34 @@ spec_data <- nir_data$corrected_spectra %>%
 ```
 
 ``` r
-spec_data %>%
-  select(starts_with("X")) %>%
-  visdat::vis_miss(warn_large_data = FALSE, large_data_size = 1e6) +
-  labs(x = "Wavelenght (nm)") +
-  theme(
-    axis.ticks.x = element_blank(), 
-    axis.text.x = element_blank()
-    )
+p1 <- sensor_dataset %>%
+  select(-starts_with("X")) %>%
+  visdat::vis_dat() + 
+  theme(legend.position = "bottom")
 ```
 
-<img src="man/figures/README-unnamed-chunk-14-1.png" width="100%" style="display: block; margin: auto;" />
+``` r
+p2 <- sensor_dataset %>%
+  select(starts_with("X")) %>%
+  visdat::vis_miss(warn_large_data = FALSE, large_data_size = 1e6) +
+  labs(x = "Wavelength Channels") +
+  theme(
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank()
+  )
+```
+
+``` r
+p1 | p2
+```
+
+<img src="man/figures/README-unnamed-chunk-16-1.png" width="100%" style="display: block; margin: auto;" />
 
 ## Laboratory data
 
 ``` r
-lab_data <- nir_data$lab_results %>%
+lab_dataset <- raw_dataset %>%
+  pluck("lab_results") %>%
   select(
     sensor,
     tube_number,
@@ -331,27 +346,26 @@ lab_data <- nir_data$lab_results %>%
 ```
 
 ``` r
-lab_data %>% visdat::vis_dat()
+p3 <- lab_dataset %>% visdat::vis_dat() + theme(legend.position = "bottom")
+p4 <- lab_dataset %>% visdat::vis_miss()
 ```
 
-<img src="man/figures/README-unnamed-chunk-16-1.png" width="100%" style="display: block; margin: auto;" />
-
 ``` r
-lab_data %>% visdat::vis_miss()
+p3 | p4
 ```
 
-<img src="man/figures/README-unnamed-chunk-17-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-19-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
-target_var <- lab_data %>% select(fat, protein, scc, lactose) %>% names()
-miscellaneous_var <- lab_data %>% select(-sensor, -tube_number, -all_of(target_var)) %>% names()
+target_var <- lab_dataset %>% select(fat, protein, scc, lactose) %>% names()
+miscellaneous_var <- lab_dataset %>% select(-sensor, -tube_number, -all_of(target_var)) %>% names()
 ```
 
-## Cleaned data
+## Processed data
 
 ``` r
-modeling_data <- spec_data %>%
-  left_join(lab_data, by = c("sensor", "tube_number")) %>%
+processed_data <- sensor_dataset %>%
+  left_join(lab_dataset, by = c("sensor", "tube_number")) %>%
   filter(if_all(starts_with("X_"), ~ !is.na(.x))) %>%
   relocate(sensor, .before = tube_number) %>%
   relocate(all_of(target_var), .after = tube_number) %>%
@@ -359,16 +373,74 @@ modeling_data <- spec_data %>%
 ```
 
 ``` r
-cat("Final dataset dimensions:", nrow(modeling_data), "x", ncol(modeling_data), "\n")
-#> Final dataset dimensions: 77986 x 266
-cat("Number of wavelenghts:", sum(grepl("^X", names(modeling_data))), "\n")
+cat("Processed data...\n")
+#> Processed data...
+cat("Dimensions:", nrow(processed_data), "x", ncol(processed_data), "\n")
+#> Dimensions: 77986 x 267
+cat("Number of wavelenghts:", sum(grepl("^X", names(processed_data))), "\n")
 #> Number of wavelenghts: 256
 ```
 
-## Observations by Sensor
+## Cleaned data
 
 ``` r
-sensor_summary <- modeling_data %>%
+processed_data %>%
+  filter(!is.na(session_from), !is.na(sensor), !is.na(tube_number)) %>%
+  group_by(session_from, sensor) %>%
+  summarise(
+    unique_tubes = n_distinct(tube_number),
+    total_measurements = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(session_from, sensor) %>%
+  ggplot() +
+  aes(x = sensor, y = unique_tubes, fill = session_from) +
+  geom_col(position = "dodge") +
+  scale_x_discrete(
+    limits = paste0("sensor_", 12:1),
+    labels = paste("Sensor", 12:1)
+  ) +
+  labs(
+    title = "Number of Unique Tubes per Sensor by Session",
+    x = "",
+    y = "Number of Unique Tubes",
+    fill = "Session"
+  ) +
+  coord_flip() +
+  theme_light() +
+  theme(
+    legend.position = "top",
+    panel.grid = element_blank()
+    )
+```
+
+<img src="man/figures/README-unnamed-chunk-23-1.png" width="100%" style="display: block; margin: auto;" />
+
+In the following, we will use only the `sensor_detected` session data
+for modeling. Moreover, the note indicates this data is more consistent,
+and our analysis shows it already provides excellent compositional
+coverage. In NIRS modeling, data quality trumps data quantity. It’s
+therefore better to have 723 high-quality, consistent measurements than
+1,023 measurements with mixed quality levels.
+
+``` r
+cleaned_data <- processed_data %>%
+  filter(session_from == "sensor_detected")
+```
+
+``` r
+cat("Cleaned data...\n")
+#> Cleaned data...
+cat("Dimensions:", nrow(cleaned_data), "x", ncol(cleaned_data), "\n")
+#> Dimensions: 50219 x 267
+cat("Number of wavelenghts:", sum(grepl("^X", names(cleaned_data))), "\n")
+#> Number of wavelenghts: 256
+```
+
+## Measurements by Sensor and Tube
+
+``` r
+sensor_summary <- cleaned_data %>%
   select(sensor, tube_number, starts_with("X")) %>%
   group_by(sensor, tube_number) %>%
   summarise(
@@ -382,7 +454,7 @@ sensor_summary <- modeling_data %>%
 
 ``` r
 sensor_summary
-#> # A tibble: 1,023 × 5
+#> # A tibble: 723 × 5
 #>    sensor   tube_number observations variables total_cells
 #>    <fct>    <fct>              <int>     <dbl>       <int>
 #>  1 sensor_1 1                     69       256       17802
@@ -395,7 +467,7 @@ sensor_summary
 #>  8 sensor_1 109                  147       256       37926
 #>  9 sensor_1 121                   25       256        6450
 #> 10 sensor_1 13                    48       256       12384
-#> # ℹ 1,013 more rows
+#> # ℹ 713 more rows
 ```
 
 ``` r
@@ -434,7 +506,7 @@ sensor_summary %>%
   )
 ```
 
-<img src="man/figures/README-unnamed-chunk-23-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-28-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
 sensor_summary %>%
@@ -489,34 +561,13 @@ sensor_summary %>%
     )
 ```
 
-<img src="man/figures/README-unnamed-chunk-24-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-29-1.png" width="100%" style="display: block; margin: auto;" />
 
-## Measurement timeline
+## Measurements timeline
 
 ``` r
-heatmap_data <- nir_data$corrected_spectra %>%
+measurement_data <- cleaned_data %>%
   mutate(datetime = as.POSIXct(datetime)) %>%
-  filter(!is.na(datetime)) %>%
-  filter(spec_type == "SAMPLE") %>%
-  drop_na() %>%
-  mutate(
-    date_hour = floor_date(datetime, "hour"),
-    sensor_num = as.integer(str_extract(sensor, "\\d+"))
-  ) %>%
-  count(date_hour, sensor_num, name = "n_measurements")
-
-all_sensors <- as.integer(1:12)
-hour_range <- seq(
-  floor_date(min(heatmap_data$date_hour), "hour"),
-  ceiling_date(max(heatmap_data$date_hour), "hour") - hours(1),
-  by = "hour"
-)
-
-measurement_data <- nir_data$corrected_spectra %>%
-  mutate(datetime = as.POSIXct(datetime)) %>%
-  filter(!is.na(datetime)) %>%
-  filter(spec_type == "SAMPLE") %>%
-  drop_na() %>%
   arrange(datetime, sensor)
 ```
 
@@ -572,14 +623,14 @@ sequence_plot <- measurement_data %>%
 sequence_plot
 ```
 
-<img src="man/figures/README-unnamed-chunk-27-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-32-1.png" width="100%" style="display: block; margin: auto;" />
 
 # Exploratory Data Analysis
 
 ## Descriptive statistics for milk quality target variables
 
 ``` r
-stat_summary <- lab_data %>% 
+stat_summary <- lab_dataset %>% 
   select(all_of(target_var)) %>%
   specProc::summaryStats(robust = TRUE)
 ```
@@ -597,7 +648,7 @@ stat_summary
 ```
 
 ``` r
-cor_matrix <- lab_data %>%
+cor_matrix <- lab_dataset %>%
   select(-sensor, -tube_number) %>%
   cor(use = "complete.obs")
 
@@ -615,10 +666,10 @@ corrplot(
 )
 ```
 
-<img src="man/figures/README-unnamed-chunk-30-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-35-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
-lab_data %>%
+lab_dataset %>%
   select(-tube_number) %>%
     ggpairs(
       columns = 1:5,
@@ -627,10 +678,10 @@ lab_data %>%
     )
 ```
 
-<img src="man/figures/README-unnamed-chunk-31-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-36-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
-p <- lab_data %>% 
+p <- lab_dataset %>% 
   select(all_of(target_var)) %>%
   specProc::adjusted_boxplot()
 
@@ -646,12 +697,12 @@ p + facet_wrap(~ variable, scales = "free", ncol = 4) +
     )
 ```
 
-<img src="man/figures/README-unnamed-chunk-32-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-37-1.png" width="100%" style="display: block; margin: auto;" />
 
 Counting the number of zero values across all target variables:
 
 ``` r
-zeros_tbl <- lab_data %>%
+zeros_tbl <- lab_dataset %>%
   select(all_of(target_var)) %>%
   summarise(across(everything(), ~ sum(.x == 0, na.rm = TRUE)))
 ```
@@ -665,7 +716,7 @@ zeros_tbl
 ```
 
 ``` r
-zero_pct <- lab_data %>%
+zero_pct <- lab_dataset %>%
   select(all_of(target_var)) %>%
   summarise(across(everything(), ~ mean(.x == 0, na.rm = TRUE))) %>%
   summarise(overall_zero_pct = mean(c_across(everything())))
@@ -674,7 +725,7 @@ nonzero_pct <- 1 - zero_pct$overall_zero_pct
 ```
 
 ``` r
-lab_data %>%
+lab_dataset %>%
   select(all_of(target_var)) %>%
   mutate(across(everything(), ~ ifelse(.x == 0, NA, .x))) %>%
   naniar::vis_miss() +
@@ -688,21 +739,20 @@ lab_data %>%
   )
 ```
 
-<img src="man/figures/README-unnamed-chunk-36-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-41-1.png" width="100%" style="display: block; margin: auto;" />
 
 These zero values probably represent missing or invalid data rather than
 true biological zeros, and might be better handled through imputation or
 exclusion rather than including them in the modeling.
 
 ``` r
-lab_data %>% 
+lab_dataset %>% 
   select(all_of(target_var)) %>%
-  # filter(if_all(everything(), ~ .x > 0)) %>% 
   specProc::outlierplot(show.mahal = TRUE) +
   theme(strip.text = element_text(size = 10, color = "black", face = "bold"))
 ```
 
-<img src="man/figures/README-unnamed-chunk-37-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-42-1.png" width="100%" style="display: block; margin: auto;" />
 
 The color gradient shows the Mahalanobis distance, while the triangular
 shape indicates multivariate outliers, i.e. samples that are unusual
@@ -735,7 +785,7 @@ unusual in the context of the multivariate relationship with other milk
 components.
 
 ``` r
-transf_list <- lab_data %>%
+transf_list <- lab_dataset %>%
   select(all_of(target_var)) %>%
   specProc::robustBCYJ(var = c("scc", "lactose"))
 ```
@@ -743,7 +793,7 @@ transf_list <- lab_data %>%
 ``` r
 transf_list %>%
   pluck("transformation") %>%
-  bind_cols(lab_data %>% select(fat, protein)) %>%
+  bind_cols(lab_dataset %>% select(fat, protein)) %>%
   relocate(c("scc", "lactose"), .after = protein) %>%
   specProc::adjusted_boxplot() +
   facet_wrap(~ variable, scales = "free", ncol = 4) +
@@ -758,18 +808,18 @@ transf_list %>%
     )
 ```
 
-<img src="man/figures/README-unnamed-chunk-39-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-44-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
 transf_list %>%
   pluck("transformation") %>%
-  bind_cols(lab_data %>% select(fat, protein)) %>%
+  bind_cols(lab_dataset %>% select(fat, protein)) %>%
   relocate(c("scc", "lactose"), .after = protein) %>%
   specProc::outlierplot(show.outlier = FALSE, show.mahal = TRUE) +
   theme(strip.text = element_text(size = 10, color = "black", face = "bold"))
 ```
 
-<img src="man/figures/README-unnamed-chunk-40-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-45-1.png" width="100%" style="display: block; margin: auto;" />
 
 After the Box-Cox transformation, SCC now shows a more symmetric
 distribution around zero, rather than the extreme right skew we saw in
@@ -781,7 +831,7 @@ driven by SCC’s original skewed distribution.
 
 ## PCA analysis
 
-### Milk quality target_var
+### Milk quality components
 
 A principal component analysis (PCA) was conducted on the four key milk
 composition variables. The analysis aimed to understand the underlying
@@ -789,7 +839,7 @@ structure of relationships between these variables and assess potential
 multicollinearity for subsequent modeling efforts.
 
 ``` r
-pca_model <- lab_data %>%
+pca_model <- lab_dataset %>%
   select(all_of(target_var), other) %>%
   PCA(scale.unit = TRUE, graph = FALSE)
 ```
@@ -830,7 +880,7 @@ p2 <- eigenvalues %>%
 p1 | p2
 ```
 
-<img src="man/figures/README-unnamed-chunk-44-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-49-1.png" width="100%" style="display: block; margin: auto;" />
 
 The PCA extracted two principal components that collectively explained
 80.5% of the total variance in the dataset. The first principal
@@ -862,7 +912,7 @@ pca_contrib(pca_model, axes = 1, title = "Dim1", fill_color = "steelblue") |
   pca_contrib(pca_model, axes = 1:2, title = "Dim1 and Dim2", fill_color = "darkgreen")
 ```
 
-<img src="man/figures/README-unnamed-chunk-46-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-51-1.png" width="100%" style="display: block; margin: auto;" />
 
 Dim1 represents a milk composition axis, with relatively balanced
 contributions from multiple composition variables. The contribution
@@ -912,7 +962,7 @@ corr_circle(pca_model, title = "Correlation Circle of Variable Relationships") |
   corr_circle(pca_model, axes = c(2, 3))
 ```
 
-<img src="man/figures/README-unnamed-chunk-48-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-53-1.png" width="100%" style="display: block; margin: auto;" />
 
 The correlation circle and contribution analysis reveal a
 three-dimensional structure in the dataset:
@@ -958,7 +1008,7 @@ plot3D::scatter3D(
 )
 ```
 
-<img src="man/figures/README-unnamed-chunk-50-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-55-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
 biplot <- function(model, axes = c(1, 2), col.ind = NULL, legend.title = NULL) {
@@ -982,36 +1032,36 @@ biplot <- function(model, axes = c(1, 2), col.ind = NULL, legend.title = NULL) {
 ```
 
 ``` r
-(biplot(pca_model, c(1, 2), lab_data$scc, "SCC\n(10³ cells/mL)") |
-  biplot(pca_model, c(2, 3), lab_data$scc, "SCC\n(10³ cells/mL)")
+(biplot(pca_model, c(1, 2), lab_dataset$scc, "SCC\n(10³ cells/mL)") |
+  biplot(pca_model, c(2, 3), lab_dataset$scc, "SCC\n(10³ cells/mL)")
 ) + plot_layout(guides = "collect")
 ```
 
-<img src="man/figures/README-unnamed-chunk-52-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-57-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
-(biplot(pca_model, c(1, 3), lab_data$protein, "Protein\n(wt%)") |
-  biplot(pca_model, c(3, 4), lab_data$protein, "Protein\n(wt%)")
+(biplot(pca_model, c(1, 3), lab_dataset$protein, "Protein\n(wt%)") |
+  biplot(pca_model, c(3, 4), lab_dataset$protein, "Protein\n(wt%)")
 ) + plot_layout(guides = "collect")
 ```
 
-<img src="man/figures/README-unnamed-chunk-53-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-58-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
-(biplot(pca_model, c(2, 3), lab_data$fat, "Fat\n(wt%)") |
-  biplot(pca_model, c(3, 4), lab_data$fat, "Fat\n(wt%)")
+(biplot(pca_model, c(2, 3), lab_dataset$fat, "Fat\n(wt%)") |
+  biplot(pca_model, c(3, 4), lab_dataset$fat, "Fat\n(wt%)")
 ) + plot_layout(guides = "collect")
 ```
 
-<img src="man/figures/README-unnamed-chunk-54-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-59-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
-(biplot(pca_model, c(1, 3), lab_data$lactose, "Lactose\n(wt%)") |
-  biplot(pca_model, c(2, 4), lab_data$lactose, "Lactose\n(wt%)")
+(biplot(pca_model, c(1, 3), lab_dataset$lactose, "Lactose\n(wt%)") |
+  biplot(pca_model, c(2, 4), lab_dataset$lactose, "Lactose\n(wt%)")
 ) + plot_layout(guides = "collect")
 ```
 
-<img src="man/figures/README-unnamed-chunk-55-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-60-1.png" width="100%" style="display: block; margin: auto;" />
 
 As previously observed, there’s a distinct point that’s completely
 isolated from the main data distribution. This observation indicated by
@@ -1030,8 +1080,8 @@ influence on the overall data structure.
 #### Measurement Quality Assessment
 
 ``` r
-drift_tbl <- modeling_data %>%
-  group_by(tube_number) %>%
+drift_tbl <- cleaned_data %>%
+  group_by(sensor, tube_number) %>%
   arrange(datetime) %>%
   mutate(
     measurement_order = row_number(),
@@ -1045,8 +1095,9 @@ drift_tbl <- modeling_data %>%
 
 ``` r
 drift_tbl %>%
-  ggplot(aes(x = measurement_order, y = total_spectral_deviation)) +
-  geom_point(alpha = 1 / 10) +
+  ggplot() +
+  aes(x = measurement_order, y = total_spectral_deviation) +
+  geom_point(shape = 21, alpha = 1 / 10) +
   geom_smooth() +
   facet_wrap(
     ~sensor,
@@ -1059,19 +1110,20 @@ drift_tbl %>%
   )
 ```
 
-<img src="man/figures/README-unnamed-chunk-57-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-62-1.png" width="100%" style="display: block; margin: auto;" />
 
 #### Spectral Noise
 
 ``` r
-measurement_precision <- modeling_data %>%
-  group_by(tube_number) %>%
+measurement_precision <- cleaned_data %>%
+  group_by(sensor, tube_number) %>%
   summarise(
     across(X1:X256, ~ sd(.x, na.rm = TRUE), .names = "sd{.col}"),
     fat = first(fat),
     n_measurements = n(),
     .groups = "drop"
-  )
+  ) %>%
+  relocate(c("fat", "n_measurements"), .after = tube_number)
 ```
 
 ``` r
@@ -1079,12 +1131,11 @@ noise_tbl <- measurement_precision %>%
   select(tube_number, fat, starts_with("sd")) %>%
   pivot_longer(
     cols = starts_with("sd"), 
-    names_to = "wavelength", 
+    names_to = "channel", 
     values_to = "noise"
     ) %>%
   mutate(
-    wavelength_num = as.numeric(str_extract(wavelength, "\\d+")),
-    wavelength_nm = 850 + (wavelength_num - 1) * 4
+    channel = as.numeric(str_extract(channel, "\\d+"))
   ) %>%
   arrange(fat) %>%
   mutate(tube_number = factor(tube_number, levels = unique(tube_number)))
@@ -1092,26 +1143,46 @@ noise_tbl <- measurement_precision %>%
 
 ``` r
 avg_noise_tbl <- noise_tbl %>%
-  group_by(wavelength_nm) %>%
+  group_by(channel) %>%
   summarise(
     mean_noise = mean(noise, na.rm = TRUE),
     sd_noise = sd(noise, na.rm = TRUE),
     min_noise = min(noise, na.rm = TRUE),
     max_noise = max(noise, na.rm = TRUE),
+    med_noise = median(noise, na.rm = TRUE),
+    mad_noise = mad(noise, na.rm = TRUE),
     .groups = "drop"
   )
 ```
 
 ``` r
+avg_noise_tbl
+#> # A tibble: 256 × 7
+#>    channel mean_noise sd_noise min_noise max_noise med_noise mad_noise
+#>      <dbl>      <dbl>    <dbl>     <dbl>     <dbl>     <dbl>     <dbl>
+#>  1       1       147.     39.5      42.1      250.      148.      48.1
+#>  2       2       143.     40.3      46.1      232.      140.      49.8
+#>  3       3       135.     39.9      57.3      218.      139.      49.3
+#>  4       4       121.     38.4      38.2      205.      127.      45.1
+#>  5       5       118.     37.6      33.9      220.      123.      46.9
+#>  6       6       127.     38.2      40.0      252.      129.      45.3
+#>  7       7       139.     37.6      45.9      239.      138.      40.2
+#>  8       8       143.     38.4      52.5      261.      144.      46.4
+#>  9       9       137.     37.3      42.0      227.      135.      44.2
+#> 10      10       124.     36.5      43.6      223.      124.      43.6
+#> # ℹ 246 more rows
+```
+
+``` r
 p3 <- noise_tbl %>%
   ggplot() +
-  aes(x = wavelength_nm, y = tube_number, fill = noise) +
+  aes(x = channel, y = tube_number, fill = noise) +
   geom_tile() +
   scale_fill_viridis_c(name = "Noise", option = "plasma") +
   labs(
-    title = "Spectral Noise Across Tubes and Wavelengths",
+    title = "Spectral Noise Across Sensors, Tubes and, Wavelength Channels",
     subtitle = "Tubes ordered by fat content (low to high)",
-    x = "Wavelength (nm)",
+    x = "Wavelength Channel",
     y = "Tube Number"
   ) +
   theme_minimal() +
@@ -1124,12 +1195,12 @@ p3 <- noise_tbl %>%
 
 ``` r
 p4 <- avg_noise_tbl %>%
-  ggplot(aes(x = wavelength_nm, y = 1, fill = mean_noise)) +
+  ggplot(aes(x = channel, y = 1, fill = mean_noise)) +
   geom_tile(height = 0.5) +
   scale_fill_viridis_c(name = "Mean\nNoise", option = "plasma") +
   labs(
     title = "",
-    x = "Wavelength (nm)",
+    x = "Wavelength Channel",
     y = ""
   ) +
   theme_minimal() +
@@ -1143,7 +1214,7 @@ p4 <- avg_noise_tbl %>%
 ``` r
 p5 <- avg_noise_tbl %>%
   ggplot() +
-  aes(x = wavelength_nm, y = mean_noise) +
+  aes(x = channel, y = mean_noise) +
   geom_ribbon(
     aes(ymin = mean_noise - sd_noise, ymax = mean_noise + sd_noise),
     alpha = 0.3,
@@ -1153,7 +1224,7 @@ p5 <- avg_noise_tbl %>%
   labs(
     title = "Average Spectral Noise Across All Tubes",
     subtitle = "Ribbon shows ± 1 standard deviation",
-    x = "Wavelength (nm)",
+    x = "Wavelength Channel",
     y = "Average Noise"
   ) +
   theme_minimal()
@@ -1163,10 +1234,10 @@ p5 <- avg_noise_tbl %>%
 (p3 | p4) / p5
 ```
 
-<img src="man/figures/README-unnamed-chunk-64-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-70-1.png" width="100%" style="display: block; margin: auto;" />
 
 ``` r
-pca_mod <- modeling_data %>%
+pca_mod <- cleaned_data %>%
   select(starts_with("X")) %>%
   PCA(scale.unit = FALSE, graph = FALSE)
 ```
@@ -1175,22 +1246,22 @@ pca_mod <- modeling_data %>%
 pca_scores <- pca_mod %>%
   pluck("ind", "coord") %>%
   as_tibble() %>%
-  bind_cols(modeling_data %>% select(sensor, all_of(target_var)), .) %>%
+  bind_cols(cleaned_data %>% select(sensor, all_of(target_var)), .) %>%
   print()
-#> # A tibble: 77,986 × 10
+#> # A tibble: 50,219 × 10
 #>    sensor     fat protein   scc lactose   Dim.1   Dim.2   Dim.3   Dim.4   Dim.5
 #>    <fct>    <dbl>   <dbl> <dbl>   <dbl>   <dbl>   <dbl>   <dbl>   <dbl>   <dbl>
-#>  1 sensor_1   4.4     3.1     9     4.5   6270.  11757.  -7212. -12294.  -4469.
-#>  2 sensor_1   4.4     3.1     9     4.5  51826.  20914.  -1628.  -6135.  -2047.
-#>  3 sensor_1   4.4     3.1     9     4.5 -54743.   -569. -10624. -13590.  -8249.
-#>  4 sensor_1   4.4     3.1     9     4.5  32866. -21134. -10024.   2166. -14651.
-#>  5 sensor_1   4.4     3.1     9     4.5 -41911.   9382.  -7206. -14435.  -6035.
-#>  6 sensor_1   4.4     3.1     9     4.5  22100. -12000.  -9712.  -2660. -11956.
-#>  7 sensor_1   4.4     3.1     9     4.5  78763. -18191.  -3211.  12269. -13211.
-#>  8 sensor_1   4.4     3.1     9     4.5  -3897.  27223.  -4050. -15185.   4031.
-#>  9 sensor_1   4.4     3.1     9     4.5  93088.  -4785.   1604.  11211. -11006.
-#> 10 sensor_1   4.4     3.1     9     4.5  -1447.  -7378. -10859.  -8628. -11713.
-#> # ℹ 77,976 more rows
+#>  1 sensor_1   4.4     3.1     9     4.5  -2342.   8213.  -5490.  11666.  -3778.
+#>  2 sensor_1   4.4     3.1     9     4.5  43452.  16707.    153.   6632.  -1214.
+#>  3 sensor_1   4.4     3.1     9     4.5 -63385.  -3370.  -9394.  10449.  -8350.
+#>  4 sensor_1   4.4     3.1     9     4.5  24547. -24867. -11323.  -1770. -13226.
+#>  5 sensor_1   4.4     3.1     9     4.5 -50533.   6295.  -5326.  11477.  -6143.
+#>  6 sensor_1   4.4     3.1     9     4.5  13674. -15654. -10099.   2743. -10755.
+#>  7 sensor_1   4.4     3.1     9     4.5  70819. -22486.  -5118. -11239. -12079.
+#>  8 sensor_1   4.4     3.1     9     4.5 -12489.  23744.  -1204.  13761.   4217.
+#>  9 sensor_1   4.4     3.1     9     4.5  85188.  -9389.    583. -10156. -10189.
+#> 10 sensor_1   4.4     3.1     9     4.5 -10032. -10701. -10506.   7939. -10884.
+#> # ℹ 50,209 more rows
 ```
 
 ``` r
@@ -1250,7 +1321,7 @@ wrap_plots(p1, p2, ncol = 1) +
   plot_layout(guides = "collect")
 ```
 
-<img src="man/figures/README-unnamed-chunk-70-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-76-1.png" width="100%" style="display: block; margin: auto;" />
 
 The sensor differences are primarily captured by Dim3 (5.96% variance),
 while Dim1 and Dim2 (which together explain 71.38% + 14.13% = ~85.4% of
@@ -1262,7 +1333,7 @@ Consequently, models built on this data should be reasonably robust
 across sensors since the main variation is sample-driven.
 
 ``` r
-pca_sensor1 <- modeling_data %>%
+pca_sensor1 <- cleaned_data %>%
   filter(sensor == "sensor_1") %>%
   select(starts_with("X")) %>%
   PCA(scale.unit = FALSE, graph = FALSE)
@@ -1272,22 +1343,22 @@ pca_sensor1 <- modeling_data %>%
 scores_sensor1 <- pca_sensor1 %>%
   pluck("ind", "coord") %>%
   as_tibble() %>%
-  bind_cols(modeling_data %>% filter(sensor == "sensor_1") %>% select(sensor, all_of(target_var)), .) %>%
+  bind_cols(cleaned_data %>% filter(sensor == "sensor_1") %>% select(sensor, all_of(target_var)), .) %>%
   print()
-#> # A tibble: 7,264 × 10
-#>    sensor     fat protein   scc lactose   Dim.1   Dim.2   Dim.3  Dim.4  Dim.5
-#>    <fct>    <dbl>   <dbl> <dbl>   <dbl>   <dbl>   <dbl>   <dbl>  <dbl>  <dbl>
-#>  1 sensor_1   4.4     3.1     9     4.5  24667.   8379.  12892.  6982.  1053.
-#>  2 sensor_1   4.4     3.1     9     4.5  67287.  28093.   6936.  5904.  1291.
-#>  3 sensor_1   4.4     3.1     9     4.5 -32718. -16132.  13892. -1733.  -905.
-#>  4 sensor_1   4.4     3.1     9     4.5  56691. -17872.  -7024.   692.   847.
-#>  5 sensor_1   4.4     3.1     9     4.5 -22103.  -3277.  15507.  -855. -1395.
-#>  6 sensor_1   4.4     3.1     9     4.5  44531. -11538.   -693.  2855.  -267.
-#>  7 sensor_1   4.4     3.1     9     4.5 100563.  -3015. -17317. -5616.  1177.
-#>  8 sensor_1   4.4     3.1     9     4.5  11716.  22983.  19481.  5757.  3926.
-#>  9 sensor_1   4.4     3.1     9     4.5 111928.  13658. -15223. -5585. -1717.
-#> 10 sensor_1   4.4     3.1     9     4.5  20715. -12641.   6376.  4632. -2400.
-#> # ℹ 7,254 more rows
+#> # A tibble: 4,330 × 10
+#>    sensor     fat protein   scc lactose   Dim.1   Dim.2   Dim.3  Dim.4   Dim.5
+#>    <fct>    <dbl>   <dbl> <dbl>   <dbl>   <dbl>   <dbl>   <dbl>  <dbl>   <dbl>
+#>  1 sensor_1   4.4     3.1     9     4.5  12537.   5978.  13881. -5472.  1658. 
+#>  2 sensor_1   4.4     3.1     9     4.5  54470.  27069.   7754. -5185.  1977. 
+#>  3 sensor_1   4.4     3.1     9     4.5 -43765. -20822.  14369.  3431. -1919. 
+#>  4 sensor_1   4.4     3.1     9     4.5  46009. -19912.  -4595. -1212.  1078. 
+#>  5 sensor_1   4.4     3.1     9     4.5 -33701.  -7495.  15639.  2618. -2245. 
+#>  6 sensor_1   4.4     3.1     9     4.5  33475. -13776.   1360. -3011.    97.0
+#>  7 sensor_1   4.4     3.1     9     4.5  89512.  -3802. -15135.  4605.   493. 
+#>  8 sensor_1   4.4     3.1     9     4.5  -1106.  20356.  19470. -2828.  3952. 
+#>  9 sensor_1   4.4     3.1     9     4.5 100189.  13376. -13556.  4325. -2513. 
+#> 10 sensor_1   4.4     3.1     9     4.5   9583. -15481.   8194. -4209. -2155. 
+#> # ℹ 4,320 more rows
 ```
 
 ``` r
@@ -1347,7 +1418,7 @@ wrap_plots(p1, p2, ncol = 1) +
   plot_layout(guides = "collect")
 ```
 
-<img src="man/figures/README-unnamed-chunk-76-1.png" width="100%" style="display: block; margin: auto;" />
+<img src="man/figures/README-unnamed-chunk-82-1.png" width="100%" style="display: block; margin: auto;" />
 
 # Modeling
 
